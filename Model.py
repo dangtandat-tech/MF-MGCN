@@ -21,74 +21,78 @@ class MF_MGCN(nn.Module):
     def __init__(self, num_nodes=19, num_bands=5):
         super(MF_MGCN, self).__init__()
         
-        # --- KIẾN TRÚC MULTI-GRAPH ---
-        # Thay vì input=5, ta dùng input=1 và quét 5 lần (Weight Sharing)
-        # Điều này giúp tổng tham số thấp (~29k) đúng như Table 1
-        
-        # Layer 1: Functional Connectivity
-        self.conv1 = GCNConv(1, 32) 
-        self.bn1 = nn.BatchNorm1d(32)
+        # --- SỬA ĐỔI 1: KHỞI TẠO RIÊNG BIỆT CHO TỪNG BĂNG TẦN (Equation 4 & 6) ---
+        # Thay vì 1 conv dùng chung, ta dùng ModuleList để chứa 5 nhánh riêng biệt.
+        self.conv1_layers = nn.ModuleList([GCNConv(1, 32) for _ in range(num_bands)])
+        self.bn1_layers = nn.ModuleList([nn.BatchNorm1d(32) for _ in range(num_bands)])
 
-        # Layer 2: Structural Connectivity
-        self.conv2 = GCNConv(32, 16)
-        self.bn2 = nn.BatchNorm1d(16)
+        # --- SỬA ĐỔI 2: OUTPUT DIMENSION = 2 (Theo Table 1) ---
+        # Table 1: Dimensions M and L ... are 32 and 2.
+        # Điều này giúp giảm số lượng tham số xuống mức ~29k.
+        self.conv2_layers = nn.ModuleList([GCNConv(32, 2) for _ in range(num_bands)])
+        self.bn2_layers = nn.ModuleList([nn.BatchNorm1d(2) for _ in range(num_bands)])
 
         # --- Fully Connected Layers ---
-        # Sau khi concat 5 bands: (19 nodes * 16 features) * 5 bands = 1520
-        self.flatten_dim = num_nodes * 16 * num_bands
+        # Sau khi concat 5 bands: (19 nodes * 2 features) * 5 bands = 190
+        self.flatten_dim = num_nodes * 2 * num_bands 
         
+        # S (Hidden units in FCL) = 128 [cite: 599]
         self.lin1 = nn.Linear(self.flatten_dim, 128)
         self.bn3 = nn.BatchNorm1d(128)
         
+        # F (Hidden units in FCL) = 32 [cite: 599]
         self.lin2 = nn.Linear(128, 32)
-        self.lin3 = nn.Linear(32, 2) # Output: AD vs NC
+        
+        # Output: AD vs NC
+        self.lin3 = nn.Linear(32, 2) 
 
-        # Khởi tạo trọng số Kaiming (He Initialization)
+        # Khởi tạo trọng số
         for m in self.modules():
             if isinstance(m, nn.Linear):
                 nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='relu')
                 nn.init.constant_(m.bias, 0)
 
     def forward(self, data, use_dropout=True):
-        # Input x shape: [Total_Nodes, 5] (5 băng tần)
-        x_all = data.x
-        
+        x_all = data.x # Shape: [Total_Nodes, 5]
         batch_size = data.num_graphs
         band_outputs = []
         
-        # --- VÒNG LẶP XỬ LÝ TỪNG BĂNG TẦN (MULTI-GRAPH LOOP) ---
-        # Đây là bí mật để đạt 96%: Xử lý riêng biệt từng tần số
+        # --- MULTI-BRANCH LOOP (Weights W_i are distinct) ---
         for i in range(5):
-            # Lấy dữ liệu băng tần thứ i: [Total_Nodes, 1]
+            # Lấy dữ liệu băng tần i
             x_band = x_all[:, i].unsqueeze(-1)
             
-            # 1. Functional GCN (Dùng Pearson Graph)
-            x = self.conv1(x_band, data.edge_index_func, data.edge_weight_func)
-            x = self.bn1(x)
-            x = F.relu(x)
-            if use_dropout: x = F.dropout(x, p=0.3, training=self.training) # Dropout nhẹ
+            # Lấy layer GCN tương ứng với băng tần i
+            conv1 = self.conv1_layers[i]
+            bn1 = self.bn1_layers[i]
+            conv2 = self.conv2_layers[i]
+            bn2 = self.bn2_layers[i]
 
-            # 2. Structural GCN (Dùng Spatial Graph)
-            x = self.conv2(x, data.edge_index_struct)
-            x = self.bn2(x)
+            # 1. Functional GCN (Pearson)
+            x = conv1(x_band, data.edge_index_func, data.edge_weight_func)
+            x = bn1(x)
+            x = F.relu(x)
+            if use_dropout: x = F.dropout(x, p=0.3, training=self.training)
+
+            # 2. Structural GCN (Spatial)
+            x = conv2(x, data.edge_index_struct)
+            x = bn2(x)
             x = F.relu(x)
             if use_dropout: x = F.dropout(x, p=0.3, training=self.training)
             
-            # Reshape về [Batch, Node, Features] để giữ thứ tự
-            # Output: [Batch, 19, 16]
+            # Reshape: [Batch, 19, 2]
             x_reshaped = x.view(batch_size, -1) 
             band_outputs.append(x_reshaped)
             
-        # --- CONCATENATION (GỘP ĐA TẦN SỐ) ---
-        # Nối kết quả 5 băng tần lại với nhau
-        # Output: [Batch, 19*16*5] = [Batch, 1520]
+        # --- CONCATENATION ---
+        # [Batch, 19*2*5] = [Batch, 190]
         x_concat = torch.cat(band_outputs, dim=1)
         
         # --- CLASSIFICATION HEAD ---
         x = self.lin1(x_concat)
         x = self.bn3(x)
         x = F.relu(x)
-        if use_dropout: x = F.dropout(x, p=0.5, training=self.training) # Dropout mạnh ở FC
+        if use_dropout: x = F.dropout(x, p=0.5, training=self.training)
         
         x = self.lin2(x)
         x = F.relu(x)
@@ -103,11 +107,8 @@ def load_processed_data():
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     PROCESSED_DIR = os.path.join(BASE_DIR, "processed_data")
     
-    # [USER EDIT]: Đường dẫn đến thư mục dataset gốc
-    RAW_DATA_ROOT = r"/kaggle/working/MF-MGCN/ds004504" 
-    
     # --- Đọc Nhãn ---
-    tsv_path = os.path.join(RAW_DATA_ROOT, "participants.tsv")
+    tsv_path = os.path.join(BASE_DIR, "participants.tsv")
     if not os.path.exists(tsv_path): 
         print(f"LỖI: Không tìm thấy {tsv_path}")
         return {'AD': [], 'NC': []}
@@ -281,8 +282,7 @@ def main():
             
             if v_acc > best_acc: best_acc = v_acc
             
-            if epoch % 10 == 0:
-                print(f"Ep {epoch:03d} | Train: {t_acc:.4f} | Val: {v_acc:.4f} | Best: {best_acc:.4f}")
+            print(f"Ep {epoch:03d} | Train: {t_acc:.6f} | Val: {v_acc:.6f} | Best: {best_acc:.6f}")
             
             scheduler.step()
 

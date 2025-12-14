@@ -1,0 +1,19 @@
+# Xử lý dữ liệu cơ bản
+numpy>=1.21.0
+pandas>=1.3.0
+scipy>=1.7.0
+matplotlib>=3.4.0
+
+# Xử lý tín hiệu EEG
+mne>=1.0.0
+pymatreader>=0.0.30  # Quan trọng để đọc file .set của EEGLAB
+
+# Machine Learning & Metrics
+scikit-learn>=1.0.0
+
+# Deep Learning (PyTorch)
+# Lưu ý: Nên cài đặt Torch theo phiên bản CUDA của máy bạn trước khi chạy file này
+torch>=2.0.0
+
+# Graph Neural Networks
+torch-geometric>=2.3.0

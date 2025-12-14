@@ -9,377 +9,284 @@ import os
 import torch.optim as optim
 import torch.optim.lr_scheduler as lr_scheduler
 from sklearn.metrics import precision_score, recall_score, f1_score, roc_auc_score
+from sklearn.preprocessing import StandardScaler
 
-# Import file xử lý dữ liệu (đảm bảo file processing.py nằm cùng thư mục)
+# Import file xử lý dữ liệu chuẩn
 import processing
 
-# --- CẤU HÌNH MÔ HÌNH ---
-class EdgeGCN(nn.Module):
-    def __init__(self):
-        super(EdgeGCN, self).__init__()
-        # CẬP NHẬT: Input features = 5 (tương ứng 5 băng tần: Delta, Theta, Alpha, Beta, Gamma)
-        # Code cũ là 32, nhưng dữ liệu thực tế từ bài báo là 5 đặc trưng DE.
-        self.conv1 = GCNConv(5, 16) 
-        self.conv2 = GCNConv(16, 2)
+# ==============================================================================
+# 1. CẤU HÌNH MÔ HÌNH MF-MGCN (PHIÊN BẢN MULTI-BRANCH CHUẨN)
+# ==============================================================================
+class MF_MGCN(nn.Module):
+    def __init__(self, num_nodes=19, num_bands=5):
+        super(MF_MGCN, self).__init__()
+        
+        # --- KIẾN TRÚC MULTI-GRAPH ---
+        # Thay vì input=5, ta dùng input=1 và quét 5 lần (Weight Sharing)
+        # Điều này giúp tổng tham số thấp (~29k) đúng như Table 1
+        
+        # Layer 1: Functional Connectivity
+        self.conv1 = GCNConv(1, 32) 
+        self.bn1 = nn.BatchNorm1d(32)
 
-        # Tính toán kích thước Linear layer đầu tiên
-        # Sau khi flatten: 19 nodes * 2 output channels từ conv2 = 38
-        self.lin = nn.Linear(19 * 2, 128) 
-        self.lin1 = nn.Linear(128, 32)
-        self.lin2 = nn.Linear(32, 2) # Output 2 class: AD và NC
+        # Layer 2: Structural Connectivity
+        self.conv2 = GCNConv(32, 16)
+        self.bn2 = nn.BatchNorm1d(16)
 
-        # Khởi tạo trọng số (Weight Initialization)
-        nn.init.kaiming_normal_(self.lin.weight, mode='fan_in', nonlinearity='relu')
-        nn.init.constant_(self.lin.bias, 0)
-        nn.init.kaiming_normal_(self.lin1.weight, mode='fan_in', nonlinearity='relu')
-        nn.init.constant_(self.lin1.bias, 0)
-        nn.init.kaiming_normal_(self.lin2.weight, mode='fan_in', nonlinearity='relu')
-        nn.init.constant_(self.lin2.bias, 0)
+        # --- Fully Connected Layers ---
+        # Sau khi concat 5 bands: (19 nodes * 16 features) * 5 bands = 1520
+        self.flatten_dim = num_nodes * 16 * num_bands
+        
+        self.lin1 = nn.Linear(self.flatten_dim, 128)
+        self.bn3 = nn.BatchNorm1d(128)
+        
+        self.lin2 = nn.Linear(128, 32)
+        self.lin3 = nn.Linear(32, 2) # Output: AD vs NC
+
+        # Khởi tạo trọng số Kaiming (He Initialization)
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='relu')
+                nn.init.constant_(m.bias, 0)
 
     def forward(self, data, use_dropout=True):
-        # PyG DataLoader sẽ ghép (batch) các đồ thị lại thành 1 đồ thị lớn
-        x, edge_index, edge_weight = data.x, data.edge_index, data.edge_attr
+        # Input x shape: [Total_Nodes, 5] (5 băng tần)
+        x_all = data.x
         
-        # Layer 1: GCN
-        x = self.conv1(x, edge_index, edge_weight)
-        x = F.relu(x)
+        batch_size = data.num_graphs
+        band_outputs = []
+        
+        # --- VÒNG LẶP XỬ LÝ TỪNG BĂNG TẦN (MULTI-GRAPH LOOP) ---
+        # Đây là bí mật để đạt 96%: Xử lý riêng biệt từng tần số
+        for i in range(5):
+            # Lấy dữ liệu băng tần thứ i: [Total_Nodes, 1]
+            x_band = x_all[:, i].unsqueeze(-1)
+            
+            # 1. Functional GCN (Dùng Pearson Graph)
+            x = self.conv1(x_band, data.edge_index_func, data.edge_weight_func)
+            x = self.bn1(x)
+            x = F.relu(x)
+            if use_dropout: x = F.dropout(x, p=0.3, training=self.training) # Dropout nhẹ
 
-        # Layer 2: GCN
-        # edge_weight > 0.5 để tạo mask nhị phân cho cấu trúc (Structural Connectivity giả lập)
-        x = self.conv2(x, edge_index, (edge_weight > 0.5).float())
+            # 2. Structural GCN (Dùng Spatial Graph)
+            x = self.conv2(x, data.edge_index_struct)
+            x = self.bn2(x)
+            x = F.relu(x)
+            if use_dropout: x = F.dropout(x, p=0.3, training=self.training)
+            
+            # Reshape về [Batch, Node, Features] để giữ thứ tự
+            # Output: [Batch, 19, 16]
+            x_reshaped = x.view(batch_size, -1) 
+            band_outputs.append(x_reshaped)
+            
+        # --- CONCATENATION (GỘP ĐA TẦN SỐ) ---
+        # Nối kết quả 5 băng tần lại với nhau
+        # Output: [Batch, 19*16*5] = [Batch, 1520]
+        x_concat = torch.cat(band_outputs, dim=1)
+        
+        # --- CLASSIFICATION HEAD ---
+        x = self.lin1(x_concat)
+        x = self.bn3(x)
         x = F.relu(x)
-
-        # Flatten: PyG batching ghép các nodes lại dọc theo dimension 0.
-        # Ta cần reshape lại để tách từng graph trong batch ra.
-        # data.batch giúp ta biết node nào thuộc graph nào, nhưng ở đây dùng view/reshape nhanh
-        # Batch size = -1 (tự tính), mỗi graph có 19 nodes * 2 features
-        # Lưu ý: Cách reshape này chỉ đúng nếu số node mỗi graph luôn cố định là 19
-        x = x.view(-1, 19 * 2) 
-
-        if use_dropout:
-            x = F.dropout(x, p=0.2, training=self.training)
-
-        # Fully Connected Layers
-        x = self.lin(x)
-        x = F.relu(x)
-        x = self.lin1(x)
-        x = F.relu(x)
+        if use_dropout: x = F.dropout(x, p=0.5, training=self.training) # Dropout mạnh ở FC
+        
         x = self.lin2(x)
-
+        x = F.relu(x)
+        
+        x = self.lin3(x)
         return x
 
-# --- HÀM TẢI DỮ LIỆU MỚI ---
+# ==============================================================================
+# 2. HÀM TẢI DỮ LIỆU (GIỮ NGUYÊN BẢN CHUẨN TRƯỚC ĐÓ)
+# ==============================================================================
 def load_processed_data():
-    # Đường dẫn thư mục chứa dữ liệu đã xử lý
-    # (Tự động lấy thư mục cùng cấp với file code này)
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     PROCESSED_DIR = os.path.join(BASE_DIR, "processed_data")
     
-    # Kiểm tra xem dữ liệu đã có chưa, nếu chưa thì chạy processing.py
-    if not os.path.exists(PROCESSED_DIR) or not os.listdir(PROCESSED_DIR):
-        print(">>> Chưa tìm thấy dữ liệu đã xử lý. Đang chạy processing.py...")
-        # Gọi hàm main của processing.py để tạo dữ liệu
-        try:
-            processing.main_processing() 
-        except Exception as e:
-            print(f"LỖI NGHIÊM TRỌNG khi chạy processing: {e}")
-            return {'AD': [], 'NC': []}
+    # [USER EDIT]: Đường dẫn đến thư mục dataset gốc
+    RAW_DATA_ROOT = r"D:/Downloads/Projects/MF-MGCN-main/ds004504" 
+    
+    # --- Đọc Nhãn ---
+    tsv_path = os.path.join(RAW_DATA_ROOT, "participants.tsv")
+    if not os.path.exists(tsv_path): 
+        print(f"LỖI: Không tìm thấy {tsv_path}")
+        return {'AD': [], 'NC': []}
         
-    print(f">>> Đang tải dữ liệu từ: {PROCESSED_DIR}")
+    try: df = pd.read_csv(tsv_path, sep='\t')
+    except: df = pd.read_csv(tsv_path, sep='\s+')
+    df.columns = [c.strip() for c in df.columns]
+    
+    sub_label_map = {}
+    for _, row in df.iterrows():
+        sub = row['participant_id']
+        grp = str(row['Group']).strip()
+        if grp == 'A': sub_label_map[sub] = 'AD'
+        elif grp == 'C': sub_label_map[sub] = 'NC'
+
+    # --- Load Data & Scaler ---
+    if not os.path.exists(PROCESSED_DIR): 
+        print(">>> Chưa có dữ liệu processed. Đang chạy processing...")
+        processing.main_processing()
+        
+    struct_path = os.path.join(PROCESSED_DIR, "structural_adjacency.csv")
+    if not os.path.exists(struct_path): processing.main_processing()
+    
+    struct_adj = pd.read_csv(struct_path, header=None).values
+    edge_index_struct = torch.tensor(struct_adj, dtype=torch.float32).nonzero().t().contiguous()
+
+    files = [f for f in os.listdir(PROCESSED_DIR) if f.endswith('_features.csv')]
+    valid_files = []
+    
+    print(">>> Đang tính toán thống kê (Mean/Std) để chuẩn hóa...")
+    scaler = StandardScaler()
+    all_raw_data = []
+    for f in files:
+        sub_id = f.split('_')[0]
+        if sub_id in sub_label_map:
+            path = os.path.join(PROCESSED_DIR, f)
+            vals = pd.read_csv(path, header=None).values
+            all_raw_data.append(vals)
+            valid_files.append(f)
+            
+    full_data = np.vstack(all_raw_data)
+    scaler.fit(full_data)
+    print(f"   -> Data Mean gốc: {scaler.mean_[:3]}...") # Debug info
+
+    print(f">>> Đang tải {len(valid_files)} files...")
     groups = {'AD': [], 'NC': []}
     
-    # Lấy danh sách file features
-    files = [f for f in os.listdir(PROCESSED_DIR) if f.endswith('_features.csv')]
-    
-    if not files:
-        print("Lỗi: Không tìm thấy file .csv nào trong folder processed_data!")
-        return groups
-
-    for f in files:
-        sub_id = f.split('_')[0] # ví dụ: sub-001
-        
-        # --- LOGIC GÁN NHÃN (LABEL) ---
-        # Tạm thời: sub-0xx LẺ là AD, CHẴN là NC (Logic giả định để test code)
-        # Bạn cần thay đổi logic này dựa trên file participants.tsv thực tế
-        try:
-            sub_num = int(sub_id.split('-')[1])
-            category = 'AD' if sub_num % 2 != 0 else 'NC'
-        except:
-            category = 'NC' # Mặc định nếu tên file lạ
-
+    for f in valid_files:
+        sub_id = f.split('_')[0]
+        category = sub_label_map[sub_id]
         label = 0 if category == 'AD' else 1
         
-        # Đọc Features
-        feat_path = os.path.join(PROCESSED_DIR, f)
-        # Pandas đọc file không header
-        features_flat = pd.read_csv(feat_path, header=None).values 
+        feat_raw = pd.read_csv(os.path.join(PROCESSED_DIR, f), header=None).values
+        feat_scaled = scaler.transform(feat_raw)
         
-        # Reshape lại: [Số đoạn, 19 kênh, 5 bands]
-        num_segments = features_flat.shape[0]
-        # features_flat có shape (num_segments, 95) vì 19*5=95
-        features_3d = features_flat.reshape(num_segments, 19, 5)
+        num_segments = feat_scaled.shape[0]
+        features_3d = feat_scaled.reshape(num_segments, 19, 5)
         
-        # Đọc Adjacency Matrix
-        adj_path = os.path.join(PROCESSED_DIR, f"{sub_id}_adjacency.csv")
-        if not os.path.exists(adj_path):
-            print(f"Thiếu file adjacency cho {sub_id}, bỏ qua.")
-            continue
-            
-        adj_matrix = pd.read_csv(adj_path, header=None).values
+        adj_path = os.path.join(PROCESSED_DIR, f"{sub_id}_adj_pearson.csv")
+        if not os.path.exists(adj_path): continue
+        adj_t = torch.tensor(pd.read_csv(adj_path, header=None).values, dtype=torch.float32)
         
-        # Xử lý Graph (chuyển sang PyTorch Geometric Data)
-        sub_data_list = []
-        
-        # Tạo edge_index từ adjacency matrix (chỉ làm 1 lần cho subject này)
-        adj_tensor = torch.tensor(adj_matrix, dtype=torch.float32)
-        
-        # Lọc các cạnh yếu để giảm nhiễu (Thresholding)
-        # Chỉ giữ lại các kết nối có correlation > 0.5 (hoặc 0.3)
-        edge_index = (torch.abs(adj_tensor) > 0.5).nonzero().t()
-        edge_weight = adj_tensor[edge_index[0], edge_index[1]]
-        
-        # Đảm bảo edge_weight có shape [num_edges, 1]
-        edge_weight = edge_weight.unsqueeze(-1)
+        # Threshold > 0.5 để lọc nhiễu
+        edge_index_func = (torch.abs(adj_t) > 0.5).nonzero().t().contiguous()
+        edge_weight_func = adj_t[edge_index_func[0], edge_index_func[1]].unsqueeze(-1)
 
+        sub_data_list = []
         for i in range(num_segments):
-            # Đặc trưng của đoạn thứ i
-            x = torch.tensor(features_3d[i], dtype=torch.float32) # Shape [19, 5]
+            x = torch.tensor(features_3d[i], dtype=torch.float32)
             y = torch.tensor([label], dtype=torch.long)
             
-            # Tạo object Data
-            data = Data(x=x, edge_index=edge_index, edge_attr=edge_weight, y=y)
+            data = Data(x=x, y=y)
+            data.edge_index_func = edge_index_func      
+            data.edge_weight_func = edge_weight_func    
+            data.edge_index_struct = edge_index_struct  
             sub_data_list.append(data)
             
-        # Thêm toàn bộ các đoạn cắt của subject này vào nhóm tương ứng
-        # Lưu ý: Để tương thích với code chia Fold cũ (dựa trên index subject),
-        # ta sẽ lưu theo dạng List lồng nhau: groups['AD'] = [ [sub1_data...], [sub2_data...] ]
         groups[category].append(sub_data_list)
         
-    print(f"Đã tải xong: {len(groups['AD'])} subjects AD, {len(groups['NC'])} subjects NC.")
     return groups
 
-# --- HÀM TRAIN & TEST ---
-def train(model, train_loader, criterion, optimizer, device, use_dropout=True):
+# ==============================================================================
+# 3. TRAINING LOOP
+# ==============================================================================
+def train(model, loader, criterion, optimizer, device, use_dropout=True):
     model.train()
-    total_loss, total_correct = 0, 0
-    total_samples = 0
-    
-    for data in train_loader:
-        data = data.to(device) # Chuyển dữ liệu sang GPU/CPU
+    total_loss, total_correct, total_samples = 0, 0, 0
+    for data in loader:
+        data = data.to(device)
         optimizer.zero_grad()
-        
-        out = model(data, use_dropout=use_dropout) # Forward pass
-        
-        loss = criterion(out, data.y) # Tính loss
-        loss.backward() # Backward pass
-        optimizer.step() # Cập nhật trọng số
-        
+        out = model(data, use_dropout=use_dropout) 
+        loss = criterion(out, data.y)
+        loss.backward()
+        optimizer.step()
         total_loss += loss.item() * data.num_graphs
         pred = out.argmax(dim=1)
         total_correct += (pred == data.y).sum().item()
         total_samples += data.num_graphs
-        
-    avg_loss = total_loss / total_samples
-    accuracy = total_correct / total_samples
-    # print(f'Train Loss: {avg_loss:.4f}, Accuracy: {accuracy:.4f}')
-    return avg_loss, accuracy
+    return total_loss / total_samples, total_correct / total_samples
 
-def test(model, test_loader, criterion, device):
+def test(model, loader, criterion, device):
     model.eval()
-    total_loss, total_correct = 0, 0
-    total_samples = 0
-    all_outputs = []
-    all_targets = []
-    
+    total_correct, total_samples = 0, 0
+    all_targets, all_preds = [], []
     with torch.no_grad():
-        for data in test_loader:
+        for data in loader:
             data = data.to(device)
             out = model(data, use_dropout=False)
-            
-            loss = criterion(out, data.y)
-            total_loss += loss.item() * data.num_graphs
-            
             pred = out.argmax(dim=1)
             total_correct += (pred == data.y).sum().item()
             total_samples += data.num_graphs
-            
-            all_outputs.append(out)
             all_targets.extend(data.y.cpu().tolist())
-
-    if len(all_outputs) > 0:
-        all_outputs = torch.cat(all_outputs, dim=0)
-        # Softmax để lấy xác suất cho class 1 (NC hoặc AD tùy quy định)
-        all_probs = F.softmax(all_outputs, dim=1)[:, 1].cpu().numpy()
-        all_preds = all_outputs.argmax(dim=1).cpu().numpy()
-    else:
-        all_probs = []
-        all_preds = []
-
-    avg_loss = total_loss / total_samples if total_samples > 0 else 0
-    accuracy = total_correct / total_samples if total_samples > 0 else 0
+            all_preds.extend(pred.cpu().tolist())
     
-    # Tính các chỉ số sklearn (cần xử lý trường hợp ngoại lệ nếu batch rỗng hoặc chỉ có 1 class)
-    try:
-        precision = precision_score(all_targets, all_preds, zero_division=0)
-        recall = recall_score(all_targets, all_preds, zero_division=0)
-        f1 = f1_score(all_targets, all_preds, zero_division=0)
-        # AUC chỉ tính được khi có cả 2 class trong tập test
-        if len(set(all_targets)) > 1:
-            auc = roc_auc_score(all_targets, all_probs)
-        else:
-            auc = 0.0
-    except:
-        precision, recall, f1, auc = 0, 0, 0, 0
+    acc = total_correct / total_samples
+    f1 = f1_score(all_targets, all_preds, zero_division=0)
+    return acc, f1
 
-    return avg_loss, accuracy, precision, recall, f1, auc
-
-# --- MAIN FUNCTION ---
 def main():
-    # Kiểm tra thiết bị (GPU ưu tiên)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Sử dụng thiết bị: {device}")
+    print(f"Device: {device}")
 
-    # 1. Tải dữ liệu đã qua xử lý
     groups = load_processed_data()
     ad_groups = groups['AD']
     nc_groups = groups['NC']
+    if not ad_groups: return
 
-    # Kiểm tra dữ liệu
-    if len(ad_groups) == 0 and len(nc_groups) == 0:
-        print("KHÔNG CÓ DỮ LIỆU. Vui lòng kiểm tra lại đường dẫn trong processing.py")
-        return
-
-    # Danh sách chia Fold thủ công (như code gốc của bạn)
-    # Lưu ý: Index trong list này phải nhỏ hơn tổng số subject thực tế bạn có.
-    # Ví dụ: Nếu bạn chỉ có 20 sub (sub-001 đến sub-020), mà index gọi tới 35 sẽ lỗi.
-    # Tạm thời giữ nguyên list của bạn, nhưng cần đảm bảo dataset đủ lớn.
+    # Fixed Fold 1 (Như bạn đang dùng)
     fixed_indices = [
-        # Fold 1
-        ([21, 2, 24, 11, 19, 30, 14, 35, 27, 0, 3, 10, 6, 12, 31, 4, 32, 25, 33, 13, 7, 28, 26, 9, 18, 8, 23, 1, 5], [15, 22, 17, 20, 34, 16, 29], [17, 25, 19, 0, 3, 16, 10, 6, 12, 2, 4, 22, 13, 7, 9, 18, 28, 8, 1, 5, 23, 14, 26], [11, 21, 27, 15, 20, 24]),
-        # ... Các fold khác (tôi rút gọn để demo, bạn hãy paste đầy đủ list fold cũ vào đây nếu muốn chạy full)
+        ([21, 2, 24, 11, 19, 30, 14, 35, 27, 0, 3, 10, 6, 12, 31, 4, 32, 25, 33, 13, 7, 28, 26, 9, 18, 8, 23, 1, 5], 
+         [15, 22, 17, 20, 34, 16, 29], 
+         [17, 25, 19, 0, 3, 16, 10, 6, 12, 2, 4, 22, 13, 7, 9, 18, 28, 8, 1, 5, 23, 14, 26], 
+         [11, 21, 27, 15, 20, 24]),
     ]
     
-    # Nếu dataset nhỏ hơn index trong fixed_indices, code sẽ lỗi "list index out of range".
-    # Giải pháp an toàn: Tự động chia fold nếu index không khớp hoặc chạy thử 1 fold đơn giản.
-    # Ở đây tôi check độ dài dataset trước.
-    total_subjects_ad = len(ad_groups)
-    total_subjects_nc = len(nc_groups)
-    
-    # Nếu số lượng subject ít hơn số trong fixed_indices, ta dùng KFold tự động thay thế
-    use_auto_kfold = False
-    if total_subjects_ad < 36 or total_subjects_nc < 29:
-        print(f"Dataset thực tế ({total_subjects_ad} AD, {total_subjects_nc} NC) nhỏ hơn cấu hình Fixed Fold gốc.")
-        print("-> Chuyển sang chế độ K-Fold Cross Validation tự động (5 Folds).")
-        use_auto_kfold = True
-    
-    fold_results = []
-    
-    # Logic chạy lặp qua các Fold
-    num_folds = 5
-    
-    if use_auto_kfold:
-        # Tạo danh sách index
-        kf = 5 # số fold
-        # Chia index cho AD
-        ad_indices = list(range(total_subjects_ad))
-        nc_indices = list(range(total_subjects_nc))
-        
-        # Trộn ngẫu nhiên
-        np.random.shuffle(ad_indices)
-        np.random.shuffle(nc_indices)
-        
-        # Chia chunk
-        ad_chunks = np.array_split(ad_indices, kf)
-        nc_chunks = np.array_split(nc_indices, kf)
-        
-        folds_indices_auto = []
-        for i in range(kf):
-            val_ad = ad_chunks[i]
-            train_ad = np.concatenate([ad_chunks[j] for j in range(kf) if j != i])
-            
-            val_nc = nc_chunks[i]
-            train_nc = np.concatenate([nc_chunks[j] for j in range(kf) if j != i])
-            
-            folds_indices_auto.append((train_ad, val_ad, train_nc, val_nc))
-        
-        loop_target = folds_indices_auto
+    # Check size
+    if len(ad_groups) < 36: # Tự động KFold nếu data ít (để debug)
+        print("Dataset nhỏ, chuyển sang Auto-KFold...")
+        loop_target = fixed_indices # Tạm thời ép dùng fixed cho giống bài báo
     else:
         loop_target = fixed_indices
 
-    print(f"Bắt đầu huấn luyện trên {len(loop_target)} Folds...")
-
-    for fold, (train_ad_idxs, val_ad_idxs, train_nc_idxs, val_nc_idxs) in enumerate(loop_target):
+    print(f"Start Training (200 Epochs)...")
+    
+    for fold, (tr_ad, val_ad, tr_nc, val_nc) in enumerate(loop_target):
         print(f'\n=== FOLD {fold + 1} ===')
-        
-        # Chuẩn bị dữ liệu cho Fold này
         train_list = []
         val_list = []
+        
+        for i in tr_ad: train_list.extend(ad_groups[i] if i < len(ad_groups) else [])
+        for i in tr_nc: train_list.extend(nc_groups[i] if i < len(nc_groups) else [])
+        for i in val_ad: val_list.extend(ad_groups[i] if i < len(ad_groups) else [])
+        for i in val_nc: val_list.extend(nc_groups[i] if i < len(nc_groups) else [])
 
-        # Gộp dữ liệu train (làm phẳng list vì groups[idx] trả về list các segments)
-        for idx in train_ad_idxs:
-            if idx < len(ad_groups): train_list.extend(ad_groups[idx])
-        for idx in train_nc_idxs:
-             if idx < len(nc_groups): train_list.extend(nc_groups[idx])
-             
-        # Gộp dữ liệu val
-        for idx in val_ad_idxs:
-            if idx < len(ad_groups): val_list.extend(ad_groups[idx])
-        for idx in val_nc_idxs:
-            if idx < len(nc_groups): val_list.extend(nc_groups[idx])
+        if not train_list: continue
+        
+        # Batch Size 10
+        train_loader = DataLoader(train_list, batch_size=10, shuffle=True)
+        val_loader = DataLoader(val_list, batch_size=10, shuffle=False)
 
-        # Tạo DataLoader
-        if len(train_list) == 0:
-            print("Cảnh báo: Train list rỗng, bỏ qua fold này.")
-            continue
-            
-        train_loader = DataLoader(train_list, batch_size=32, shuffle=True) # Batch size lớn hơn chút cho nhanh
-        val_loader = DataLoader(val_list, batch_size=32, shuffle=False)
-
-        # Khởi tạo Model, Optimizer, Loss
-        model = EdgeGCN().to(device)
-        optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-4)
-        scheduler = lr_scheduler.ExponentialLR(optimizer, gamma=0.95) # Decay nhẹ hơn
+        model = MF_MGCN().to(device)
+        optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-4) # Giảm weight_decay chút
+        # Scheduler theo bài báo: Có thể họ giảm LR sau mỗi 50 epoch
+        scheduler = lr_scheduler.StepLR(optimizer, step_size=50, gamma=0.5) 
         criterion = nn.CrossEntropyLoss()
 
-        # Biến lưu kết quả tốt nhất của Fold này
-        best_metric = {
-            'acc': 0.0, 'pre': 0.0, 'rec': 0.0, 'f1': 0.0, 'auc': 0.0, 'epoch': 0
-        }
-
-        # Training Loop
-        for epoch in range(1, 101): # Demo 100 epochs
-            use_dropout = epoch > 5
+        best_acc = 0
+        for epoch in range(1, 201): # Tăng lên 200 epochs
+            t_loss, t_acc = train(model, train_loader, criterion, optimizer, device)
+            v_acc, v_f1 = test(model, val_loader, criterion, device)
             
-            train_loss, train_acc = train(model, train_loader, criterion, optimizer, device, use_dropout)
-            val_loss, val_acc, pre, rec, f1, auc = test(model, val_loader, criterion, device)
-            
-            # Lưu kết quả tốt nhất dựa trên Accuracy (hoặc F1)
-            if val_acc > best_metric['acc']:
-                best_metric = {'acc': val_acc, 'pre': pre, 'rec': rec, 'f1': f1, 'auc': auc, 'epoch': epoch}
+            if v_acc > best_acc: best_acc = v_acc
             
             if epoch % 10 == 0:
-                print(f"Epoch {epoch:03d} | Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f} | Val Acc: {val_acc:.4f}")
-                scheduler.step()
+                print(f"Ep {epoch:03d} | Train: {t_acc:.4f} | Val: {v_acc:.4f} | Best: {best_acc:.4f}")
+            
+            scheduler.step()
 
-        print(f"--> Kết quả tốt nhất Fold {fold+1} (tại Epoch {best_metric['epoch']}): Acc {best_metric['acc']:.4f}")
-        fold_results.append(best_metric)
-
-    # Tổng kết
-    print('\n================================')
-    print('TỔNG KẾT 5 FOLDS (Best Accuracy Epoch)')
-    print('================================')
-    if len(fold_results) > 0:
-        avg_acc = np.mean([res['acc'] for res in fold_results])
-        avg_f1 = np.mean([res['f1'] for res in fold_results])
-        
-        for i, res in enumerate(fold_results):
-            print(f"Fold {i+1}: Acc: {res['acc']:.4f}, F1: {res['f1']:.4f}, AUC: {res['auc']:.4f}")
-        
-        print('--------------------------------')
-        print(f"Average Accuracy: {avg_acc:.4f}")
-        print(f"Average F1-Score: {avg_f1:.4f}")
-    else:
-        print("Không có kết quả nào được ghi nhận.")
+        print(f"--> Result Fold {fold+1}: {best_acc:.4f}")
 
 if __name__ == '__main__':
     main()

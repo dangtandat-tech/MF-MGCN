@@ -10,9 +10,21 @@ import torch.optim as optim
 import torch.optim.lr_scheduler as lr_scheduler
 from sklearn.metrics import precision_score, recall_score, f1_score, roc_auc_score
 from sklearn.preprocessing import StandardScaler
+import random
 
 # Import file xử lý dữ liệu chuẩn
 import processing
+
+
+def seed_everything(seed=42):
+    random.seed(seed)
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 # ==============================================================================
 # 1. CẤU HÌNH MÔ HÌNH MF-MGCN (PHIÊN BẢN MULTI-BRANCH CHUẨN)
@@ -135,7 +147,7 @@ def load_processed_data():
     struct_adj = pd.read_csv(struct_path, header=None).values
     edge_index_struct = torch.tensor(struct_adj, dtype=torch.float32).nonzero().t().contiguous()
 
-    files = [f for f in os.listdir(PROCESSED_DIR) if f.endswith('_features.csv')]
+    files = sorted([f for f in os.listdir(PROCESSED_DIR) if f.endswith('_features.csv')])
     valid_files = []
     
     print(">>> Đang tính toán thống kê (Mean/Std) để chuẩn hóa...")
@@ -228,6 +240,7 @@ def test(model, loader, criterion, device):
     return acc, f1
 
 def main():
+    seed_everything(42)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Device: {device}")
 

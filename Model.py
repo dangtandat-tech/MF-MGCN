@@ -104,7 +104,7 @@ def load_processed_data():
     PROCESSED_DIR = os.path.join(BASE_DIR, "processed_data")
     
     # [USER EDIT]: Đường dẫn đến thư mục dataset gốc
-    RAW_DATA_ROOT = r"D:/Downloads/Projects/MF-MGCN-main/ds004504" 
+    RAW_DATA_ROOT = r"/kaggle/working/MF-MGCN/ds004504" 
     
     # --- Đọc Nhãn ---
     tsv_path = os.path.join(RAW_DATA_ROOT, "participants.tsv")

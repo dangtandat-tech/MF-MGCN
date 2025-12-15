@@ -104,7 +104,7 @@ class MF_MGCN(nn.Module):
         x = self.lin1(x_concat)
         x = self.bn3(x)
         x = F.relu(x)
-        if use_dropout: x = F.dropout(x, p=0.5, training=self.training)
+        if use_dropout: x = F.dropout(x, p=0.2, training=self.training)
         
         x = self.lin2(x)
         x = F.relu(x)
@@ -184,7 +184,7 @@ def load_processed_data():
         adj_t = torch.tensor(pd.read_csv(adj_path, header=None).values, dtype=torch.float32)
         
         # Threshold > 0.5 để lọc nhiễu
-        edge_index_func = (torch.abs(adj_t) > 0.5).nonzero().t().contiguous()
+        edge_index_func = (torch.abs(adj_t) > 0.3).nonzero().t().contiguous()
         edge_weight_func = adj_t[edge_index_func[0], edge_index_func[1]].unsqueeze(-1)
 
         sub_data_list = []
@@ -289,7 +289,7 @@ def main():
         criterion = nn.CrossEntropyLoss()
 
         best_acc = 0
-        for epoch in range(1, 201): # Tăng lên 200 epochs
+        for epoch in range(0, 100): # Tăng lên 200 epochs
             t_loss, t_acc = train(model, train_loader, criterion, optimizer, device)
             v_acc, v_f1 = test(model, val_loader, criterion, device)
             

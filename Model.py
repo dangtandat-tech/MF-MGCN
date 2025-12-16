@@ -9,12 +9,13 @@ import numpy as np
 import os
 import torch.optim as optim
 import torch.optim.lr_scheduler as lr_scheduler
-from sklearn.metrics import f1_score
+from sklearn.metrics import f1_score, roc_auc_score
 from sklearn.preprocessing import StandardScaler
 import random
+import copy  # Dùng để lưu best model weights
 
 # ==============================================================================
-# CẤU HÌNH REPRODUCIBILITY
+# CẤU HÌNH REPRODUCIBILITY (Đảm bảo kết quả lặp lại được)
 # ==============================================================================
 def seed_everything(seed=42):
     random.seed(seed)
@@ -27,14 +28,13 @@ def seed_everything(seed=42):
     torch.backends.cudnn.benchmark = False
 
 # ==============================================================================
-# 1. CẤU HÌNH MÔ HÌNH MF-MGCN (OPTIMAL VERSION K=16)
+# [cite_start]1. CẤU HÌNH MÔ HÌNH MF-MGCN (OPTIMAL VERSION K=16) [cite: 599]
 # ==============================================================================
 class MF_MGCN(nn.Module):
     def __init__(self, num_nodes=19, num_bands=5):
         super(MF_MGCN, self).__init__()
         
-        #  Bài báo nói K=16 cho kết quả tốt nhất (Section 5.4)
-        # Mặc dù Table 1 ghi 32, nhưng thực nghiệm của họ chọn 16.
+        # Bài báo (Section 5.4) thực nghiệm thấy K=16 tốt nhất
         K_HIDDEN = 16 
         
         # --- LAYER 1: FUNCTIONAL CONNECTIVITY (Riêng biệt từng band) ---
@@ -51,7 +51,7 @@ class MF_MGCN(nn.Module):
         # Flatten: 19 nodes * 2 features * 5 bands = 190
         self.flatten_dim = num_nodes * 2 * num_bands 
         
-        # S = 128, F = 32 [cite: 599]
+        # [cite_start]S = 128, F = 32 [cite: 599]
         self.lin1 = nn.Linear(self.flatten_dim, 128)
         self.bn3 = nn.BatchNorm1d(128)
         self.lin2 = nn.Linear(128, 32)
@@ -86,6 +86,7 @@ class MF_MGCN(nn.Module):
             x = self.conv1_layers[i](x_band, edge_indices[i], edge_weights[i])
             x = self.bn1_layers[i](x)
             x = F.relu(x)
+            # [cite_start]Dropout GCN: 0.3 [cite: 262]
             if use_dropout: x = F.dropout(x, p=0.3, training=self.training)
 
             # 3. Layer 2: Structural GCN
@@ -105,7 +106,7 @@ class MF_MGCN(nn.Module):
         x = self.lin1(x_concat)
         x = self.bn3(x)
         x = F.relu(x)
-        # Dropout ở FC layer thường cao hơn (0.5) [cite: 599] (implicitly implied by standard practices)
+        # Dropout FC: 0.5 (Standard regularization)
         if use_dropout: x = F.dropout(x, p=0.5, training=self.training)
         
         x = self.lin2(x)
@@ -115,7 +116,7 @@ class MF_MGCN(nn.Module):
         return x
 
 # ==============================================================================
-# 2. DATA LOADER (GIỮ NGUYÊN BẢN ROBUST)
+# 2. DATA LOADER (ROBUST VERSION WITH ABSOLUTE ADJACENCY)
 # ==============================================================================
 def load_raw_data_dict():
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -186,14 +187,14 @@ def create_dataloaders(raw_data_dict, struct_edge_index, train_indices, val_indi
 
     if not train_subs: return None, None
 
-    # Fit Scaler
+    # Fit Scaler (Chỉ trên tập Train để tránh Data Leakage)
     train_feats_all = []
     for sub in train_subs:
         train_feats_all.append(sub['features'])
     
     all_train_data = np.vstack(train_feats_all)
     scaler.fit(all_train_data)
-    scaler.scale_ = np.maximum(scaler.scale_, 1e-5)
+    scaler.scale_ = np.maximum(scaler.scale_, 1e-5) # Tránh chia cho 0
     
     def convert_to_pyg(sub_list, is_train=False):
         data_list = []
@@ -213,10 +214,11 @@ def create_dataloaders(raw_data_dict, struct_edge_index, train_indices, val_indi
             for b in range(5):
                 adj_t = torch.tensor(adj_5bands[b], dtype=torch.float32)
                 
-                # --- QUAN TRỌNG: LẤY TRỊ TUYỆT ĐỐI ---
+                # --- [QUAN TRỌNG] FIX LỖI NAN LOSS: LẤY TRỊ TUYỆT ĐỐI ---
+                # GCN cần trọng số dương để tính Degree Matrix chuẩn hóa
                 abs_adj = torch.abs(adj_t)
                 
-                # Ngưỡng lọc nhiễu 0.5 (Có thể thử giảm xuống 0.3 nếu data quá thưa)
+                # Ngưỡng lọc nhiễu 0.5 (Theo kinh nghiệm xử lý Pearson)
                 mask = abs_adj > 0.5
                 idx = mask.nonzero().t().contiguous()
                 w = abs_adj[idx[0], idx[1]].unsqueeze(-1)
@@ -231,6 +233,7 @@ def create_dataloaders(raw_data_dict, struct_edge_index, train_indices, val_indi
                 data = Data(x=x, y=y)
                 data.edge_index_struct = struct_edge_index
                 
+                # Gán edge features
                 data.edge_index_b0, data.edge_weight_b0 = edge_indices[0], edge_weights[0]
                 data.edge_index_b1, data.edge_weight_b1 = edge_indices[1], edge_weights[1]
                 data.edge_index_b2, data.edge_weight_b2 = edge_indices[2], edge_weights[2]
@@ -264,9 +267,10 @@ def train_epoch(model, loader, criterion, optimizer, device):
         out = model(data, use_dropout=True)
         loss = criterion(out, data.y)
         
-        if torch.isnan(loss): continue
+        if torch.isnan(loss): continue # Bỏ qua batch lỗi
             
         loss.backward()
+        # Gradient Clipping để ổn định
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
         
@@ -297,7 +301,7 @@ def evaluate(model, loader, criterion, device):
     return acc, f1
 
 # ==============================================================================
-# 4. MAIN
+# 4. MAIN (VỚI TÍNH NĂNG LƯU BEST MODEL & SCHEDULER ADAPTIVE)
 # ==============================================================================
 def main():
     seed_everything(42)
@@ -312,7 +316,7 @@ def main():
 
     struct_edge_index = struct_edge_index.to(device)
     
-    # Định nghĩa Folds
+    # Định nghĩa Folds (Fold 1)
     folds_indices = [
         (
             [21, 2, 24, 11, 19, 30, 14, 35, 27, 0, 3, 10, 6, 12, 31, 4, 32, 25, 33, 13, 7, 28, 26, 9, 18, 8, 23, 1, 5], 
@@ -322,7 +326,7 @@ def main():
         ),
     ]
 
-    print(f"Bắt đầu Training MF-MGCN (Optimal K=16) - 200 Epochs...")
+    print(f"Bắt đầu Training MF-MGCN (Final Tuning) - 200 Epochs...")
 
     for fold_idx, (tr_ad, val_ad, tr_nc, val_nc) in enumerate(folds_indices):
         print(f'\n=== FOLD {fold_idx + 1} ===')
@@ -339,33 +343,38 @@ def main():
             continue
 
         model = MF_MGCN().to(device)
-        
-        # [QUAN TRỌNG] Tăng lại Learning Rate lên 0.001 vì data đã sạch (theo Table 1)
         optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-4)
         
-        # StepLR: Giảm LR sau mỗi 50 epoch (cho 200 epoch tổng)
-        scheduler = lr_scheduler.StepLR(optimizer, step_size=50, gamma=0.5)
+        # --- NÂNG CẤP SCHEDULER: ReduceLROnPlateau ---
+        # Theo dõi 'max' (Val Accuracy). Nếu không tăng sau 20 epoch, giảm LR đi 1 nửa.
+        scheduler = lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=20, verbose=True)
         
         criterion = nn.CrossEntropyLoss()
 
         best_acc = 0.0
         best_f1 = 0.0
+        best_model_wts = copy.deepcopy(model.state_dict()) # Lưu trữ trọng số tốt nhất
         
-        for epoch in range(200): # Chạy đủ 200 Epochs
+        for epoch in range(200):
             t_loss, t_acc = train_epoch(model, train_loader, criterion, optimizer, device)
             v_acc, v_f1 = evaluate(model, val_loader, criterion, device)
             
+            # --- CHECKPOINTING: Lưu lại model nếu kết quả tốt hơn ---
             if v_acc > best_acc:
                 best_acc = v_acc
                 best_f1 = v_f1
+                best_model_wts = copy.deepcopy(model.state_dict())
             
-            # Print tiến độ chi tiết hơn
+            # Cập nhật Scheduler dựa trên kết quả Validation
+            scheduler.step(v_acc)
+            
             if epoch % 5 == 0 or epoch == 199:
-                print(f"Ep {epoch:03d} | Loss: {t_loss:.4f} | Tr_Acc: {t_acc:.4f} | Val_Acc: {v_acc:.4f} | Best: {best_acc:.4f}")
-            
-            scheduler.step()
+                curr_lr = optimizer.param_groups[0]['lr']
+                print(f"Ep {epoch:03d} | LR: {curr_lr:.5f} | Loss: {t_loss:.4f} | Tr_Acc: {t_acc:.4f} | Val_Acc: {v_acc:.4f} | Best: {best_acc:.4f}")
 
-        print(f"--> Kết quả Fold {fold_idx+1}: Accuracy = {best_acc:.4f}, F1-Score = {best_f1:.4f}")
+        # --- LOAD LẠI BEST MODEL ĐỂ BÁO CÁO KẾT QUẢ CUỐI ---
+        model.load_state_dict(best_model_wts)
+        print(f"--> KẾT QUẢ TỐI ƯU Fold {fold_idx+1} (Best Model): Accuracy = {best_acc:.4f}, F1-Score = {best_f1:.4f}")
 
 if __name__ == '__main__':
     main()

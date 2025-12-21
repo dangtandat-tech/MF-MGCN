@@ -4,6 +4,9 @@ import numpy as np
 import pandas as pd
 import mne
 import warnings
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.preprocessing import StandardScaler
 
 # Tắt cảnh báo MNE không cần thiết để output gọn gàng
 warnings.filterwarnings("ignore")
@@ -50,6 +53,16 @@ BRAIN_REGIONS = {
 # ==============================================================================
 # 2. CÁC HÀM TÍNH TOÁN CỐT LÕI (ĐÃ GIA CỐ)
 # ==============================================================================
+
+def normalize_features(features_matrix):
+    """
+    Chuẩn hóa Z-score cho ma trận đặc trưng.
+    Input: features_matrix có dạng (n_segments, n_channels * n_bands)
+    """
+    scaler = StandardScaler()
+    # Fit và transform trên chính dữ liệu của subject đó
+    normalized_data = scaler.fit_transform(features_matrix)
+    return normalized_data
 
 def calculate_de(signal_data):
     """
@@ -124,6 +137,7 @@ def process_one_subject(file_path, save_dir, sub_id):
             return
 
         raw.pick_channels(picks, ordered=True)
+        raw.set_eeg_reference('average', projection=False)
         
         # Cắt thời lượng
         if raw.times[-1] > DURATION_LIMIT:
@@ -188,46 +202,130 @@ def process_one_subject(file_path, save_dir, sub_id):
         n_segs = all_features.shape[0]
 
         # --- BƯỚC 4: TÍNH MULTI-GRAPH ADJACENCY (PEARSON) ---
+# --- BƯỚC 4: TÍNH MULTI-GRAPH ADJACENCY (PEARSON) ---
         adj_matrices = []
         for band_idx in range(5):
-            # Lấy features của band thứ band_idx: (n_segs, 19)
             band_data = all_features[:, :, band_idx]
-            
-            # Tính correlation giữa các kênh theo thời gian (biến thiên của DE)
-            # Transpose -> (19, n_segs)
             channel_series = band_data.T
             
-            # [QUAN TRỌNG] Xử lý trường hợp chuỗi hằng số (variance=0) gây ra NaN khi chia
             try:
                 with np.errstate(divide='ignore', invalid='ignore'):
                     corr = np.corrcoef(channel_series)
             except:
                 corr = np.zeros((19, 19))
             
-            # Thay thế NaN bằng 0 (không tương quan)
             corr = np.nan_to_num(corr, nan=0.0)
-            
             adj_matrices.append(corr)
             
-        # Kết quả: (5, 19, 19)
+        # Chuyển thành mảng numpy (5, 19, 19)
         adj_multiband = np.array(adj_matrices)
 
-        # --- BƯỚC 5: LƯU DỮ LIỆU ---
-        # 1. Features
+        # --- BƯỚC 5: CHUẨN HÓA VÀ LƯU DỮ LIỆU ---
+        # 1. Làm phẳng đặc trưng: (n_segs, 19, 5) -> (n_segs, 95)
         features_flat = all_features.reshape(n_segs, -1)
-        # Clean lần cuối trước khi lưu
-        features_flat = np.nan_to_num(features_flat, nan=0.0)
+        features_flat = np.nan_to_num(features_flat, nan=0.0, posinf=0.0, neginf=0.0)
         
-        pd.DataFrame(features_flat).to_csv(os.path.join(save_dir, f"{sub_id}_features.csv"), header=False, index=False)
+        # 2. Áp dụng Z-score Normalization
+        features_normalized = normalize_features(features_flat)
         
-        # 2. Adjacency
-        np.save(os.path.join(save_dir, f"{sub_id}_adj_multiband.npy"), adj_multiband)
+        # 3. Lưu dữ liệu
+        feat_path = os.path.join(save_dir, f"{sub_id}_features.npy")
+        adj_path = os.path.join(save_dir, f"{sub_id}_adj_multiband.npy")
         
-        print(f"Processed: {sub_id} | Segments: {n_segs}")
+        np.save(feat_path, features_normalized.astype(np.float32))
+        np.save(adj_path, adj_multiband.astype(np.float32))
+        
+        print(f"Finished {sub_id}: Segments={n_segs} | Shape={features_normalized.shape}")
+
+        if sub_id == "sub-001": 
+            # Lấy sfreq thực tế từ file data
+            current_sfreq = raw.info['sfreq'] 
+            
+            visualize_processing_results(
+                raw_data=raw.get_data(), 
+                filtered_data_dict=filtered_signals, # Truyền Dictionary, KHÔNG truyền string "beta"
+                de_features=all_features, 
+                adj_matrix=adj_multiband, 
+                sub_id=sub_id,
+                sfreq=current_sfreq,
+                target_band='Alpha' # Bạn có thể đổi thành 'Alpha' hoặc 'Gamma' tùy ý
+            )
 
     except Exception as e:
         print(f"FAILED {sub_id}: {str(e)}")
 
+def visualize_processing_results(raw_data, filtered_data_dict, de_features, adj_matrix, sub_id, sfreq, target_band='Beta'):
+    """
+    Vẽ minh họa kết quả xử lý dữ liệu EEG.
+    
+    Tham số:
+    - raw_data: Mảng dữ liệu gốc (n_channels, n_samples)
+    - filtered_data_dict: Dictionary chứa data đã lọc theo từng band
+    - de_features: Mảng đặc trưng DE (n_segments, 19, 5)
+    - adj_matrix: Ma trận kề đa băng tần (5, 19, 19)
+    - sub_id: ID của đối tượng
+    - sfreq: Tần số lấy mẫu (Hz)
+    - target_band: Tên băng tần muốn xem (Mặc định: 'Beta')
+    """
+    
+    # 1. Xác định vị trí (index) của băng tần trong danh sách BANDS
+    band_names = ['Delta', 'Theta', 'Alpha', 'Beta', 'Gamma']
+    if target_band not in band_names:
+        print(f"Lỗi: Không tìm thấy băng tần {target_band}")
+        return
+    band_idx = band_names.index(target_band)
+
+    # Cấu hình phong cách đồ thị
+    sns.set_theme(style="whitegrid")
+    fig = plt.figure(figsize=(20, 12))
+    fig.suptitle(f"EEG DATA ANALYSIS - SUBJECT: {sub_id} (Band: {target_band})", fontsize=20, fontweight='bold', y=0.98)
+
+    # --- PANEL 1: SO SÁNH TÍN HIỆU THỜI GIAN (10 GIÂY ĐẦU) ---
+    plt.subplot(2, 2, 1)
+    ch_idx = 2   # Vẽ kênh Fp1 (index 0)
+    time_limit = 10 
+    samples = int(time_limit * sfreq)
+    time_axis = np.linspace(0, time_limit, samples)
+    
+    raw_snippet = raw_data[ch_idx, :samples] 
+    filtered_snippet = filtered_data_dict[target_band][ch_idx, :samples] 
+    
+    plt.plot(time_axis, raw_snippet, label='Raw EEG (Original)', alpha=0.4, color='gray', linestyle='--')
+    plt.plot(time_axis, filtered_snippet, label=f'{target_band} Band Filtered', color='crimson', linewidth=1.5)
+    plt.title(f"Signal Comparison - Channel: {STANDARD_CHANNELS[ch_idx]}", fontsize=14)
+    plt.xlabel("Time (seconds)")
+    plt.ylabel("Amplitude (V)")
+    plt.legend(loc='upper right')
+
+    # --- PANEL 2: BIỂU ĐỒ NHIỆT ĐẶC TRƯNG DE (TẤT CẢ CÁC KÊNH) ---
+    plt.subplot(2, 2, 2)
+    # Trích xuất DE của band tương ứng: (n_segments, 19) -> Transpose để kênh nằm ở trục dọc
+    band_de = de_features[:, :, band_idx].T 
+    
+    sns.heatmap(band_de, cmap='magma', cbar_kws={'label': 'DE Value (bits)'})
+    plt.title(f"Differential Entropy Heatmap - {target_band} Band", fontsize=14)
+    plt.xlabel("Sliding Window Segments (10s, 90% overlap)")
+    plt.ylabel("EEG Channels")
+    plt.yticks(ticks=np.arange(19)+0.5, labels=STANDARD_CHANNELS, rotation=0)
+
+    # --- PANEL 3: MA TRẬN KỀ ĐỘNG (DYNAMICAL CONNECTIVITY) ---
+    plt.subplot(2, 2, 3)
+    # Lấy ma trận kề của band tương ứng
+    sns.heatmap(adj_matrix[band_idx], cmap='YlOrRd', square=True, annot=False)
+    plt.title(f"Dynamic Adjacency (Pearson Correlation - {target_band})", fontsize=14)
+    plt.xlabel("Channel Index")
+    plt.ylabel("Channel Index")
+
+    # --- PANEL 4: MA TRẬN CẤU TRÚC (STRUCTURAL ADJACENCY) ---
+    plt.subplot(2, 2, 4)
+    struct_adj = create_structural_adjacency() #
+    sns.heatmap(struct_adj, cmap='Greys', cbar=False, square=True)
+    plt.title("Structural Adjacency (Intra-region Connection)", fontsize=14)
+    plt.xlabel("Channel Index")
+    plt.ylabel("Channel Index")
+
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    plt.show()
 # ==============================================================================
 # 4. HÀM MAIN
 # ==============================================================================

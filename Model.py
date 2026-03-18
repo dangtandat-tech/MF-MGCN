@@ -11,7 +11,9 @@ import torch.optim as optim
 import torch.optim.lr_scheduler as lr_scheduler
 from sklearn.metrics import f1_score, roc_auc_score
 from sklearn.preprocessing import StandardScaler
+from torchinfo import summary
 import random
+from torch_geometric.nn import summary as pyg_summary
 import copy  # Dùng để lưu best model weights
 
 # ==============================================================================
@@ -69,7 +71,7 @@ class MF_MGCN(nn.Module):
         batch_size = data.num_graphs
         band_outputs = []
         
-        edge_indices = [
+        edge_indices = [ 
             data.edge_index_b0, data.edge_index_b1, data.edge_index_b2, 
             data.edge_index_b3, data.edge_index_b4
         ]
@@ -129,9 +131,13 @@ def load_raw_data_dict():
     
     sub_label_map = {}
     for _, row in df.iterrows():
-        sub = row['participant_id']
-        grp = str(row['Group']).strip()
-        sub_label_map[sub] = 'AD' if grp == 'A' else 'NC'
+            sub = row['participant_id']
+            grp = str(row['Group']).strip()
+            
+            if grp == 'A':
+                sub_label_map[sub] = 'AD'
+            elif grp == 'C':
+                sub_label_map[sub] = 'NC'
 
     # --- Load Structural Adjacency ---
     struct_path = os.path.join(PROCESSED_DIR, "structural_adjacency.csv")
@@ -180,7 +186,21 @@ def create_dataloaders(raw_data_dict, struct_edge_index, train_indices, val_indi
     ad_ids = {item['id'] for item in ad_list}
     
     def get_subs(indices, source_list):
-        return [source_list[i] for i in indices if i < len(source_list)]
+        result = []
+        # Đưa indices về dạng Set (kiểu số nguyên) để tìm kiếm cực nhanh
+        target_ids = set(indices) 
+        
+        for sub in source_list:
+            raw_id = sub['id'] # Ví dụ: '021' hoặc 'sub-021'
+            
+            # Bọc tách chỉ lấy các chữ số ra khỏi chuỗi (bỏ qua 'sub-', 'A',...)
+            digits_only = ''.join(filter(str.isdigit, raw_id))
+            
+            # Nếu lấy được số, ép nó về int (Ví dụ: '021' -> 21)
+            if digits_only and int(digits_only) in target_ids:
+                result.append(sub)
+                
+        return result
 
     train_subs = get_subs(train_indices['AD'], ad_list) + get_subs(train_indices['NC'], nc_list)
     val_subs = get_subs(val_indices['AD'], ad_list) + get_subs(val_indices['NC'], nc_list)
@@ -262,6 +282,7 @@ def train_epoch(model, loader, criterion, optimizer, device):
     
     for data in loader:
         data = data.to(device)
+
         optimizer.zero_grad()
         
         out = model(data, use_dropout=True)
@@ -343,11 +364,26 @@ def main():
             continue
 
         model = MF_MGCN().to(device)
+
+        # =====================================================================
+        # [THÊM MỚI] XEM CẤU TRÚC MÔ HÌNH BẰNG TORCHINFO
+        # =====================================================================
+        print("\n=== THÔNG TIN KIẾN TRÚC MÔ HÌNH ===")
+        # 1. Rút thử 1 batch dữ liệu từ train_loader để làm dữ liệu mẫu (dummy data)
+        dummy_data = next(iter(train_loader)).to(device)
+        
+        try:
+            # PyG summary chỉ cần truyền model và các tham số đầu vào của hàm forward
+            print(pyg_summary(model, dummy_data))
+        except Exception as e:
+            print(f"Lỗi: {e}")
+        print("========================================\n")
+
         optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-4)
         
         # --- NÂNG CẤP SCHEDULER: ReduceLROnPlateau ---
         # Theo dõi 'max' (Val Accuracy). Nếu không tăng sau 20 epoch, giảm LR đi 1 nửa.
-        scheduler = lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=20, verbose=True)
+        scheduler = lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=20)
         
         criterion = nn.CrossEntropyLoss()
 

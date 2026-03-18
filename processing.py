@@ -220,8 +220,9 @@ def process_one_subject(file_path, save_dir, sub_id):
         # Chuyển thành mảng numpy (5, 19, 19)
         adj_multiband = np.array(adj_matrices)
 
-        # --- BƯỚC 5: CHUẨN HÓA VÀ LƯU DỮ LIỆU ---
-        # 1. Làm phẳng đặc trưng: (n_segs, 19, 5) -> (n_segs, 95)
+        # --- BƯỚC 5: LƯU DỮ LIỆU ---
+        # 1. Features
+        # Ma trận (n_segs, 19x5)
         features_flat = all_features.reshape(n_segs, -1)
         features_flat = np.nan_to_num(features_flat, nan=0.0, posinf=0.0, neginf=0.0)
         

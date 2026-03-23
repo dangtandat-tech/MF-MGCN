@@ -7,7 +7,7 @@ import numpy as np
 import random
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import f1_score, accuracy_score
-from torch_geometric.nn import GCNConv
+from torch_geometric.nn import GCNConv, GATConv, BatchNorm, global_mean_pool, global_max_pool
 from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader
 from torch_geometric.nn import summary
@@ -19,25 +19,35 @@ def seed_everything(seed=42):
     torch.manual_seed(seed)
 
 class SimpleGCN(nn.Module):
-    def __init__(self, num_node_features=5, num_nodes=19, num_classes=2):
+    def __init__(self, num_node_features=5, hidden_dim=16, num_classes=2):
         super().__init__()
-        self.conv1 = GCNConv(num_node_features, 16)
-        self.conv2 = GCNConv(16, 8)
-        self.fc = nn.Linear(num_nodes * 8, num_classes)
+        self.conv1 = GATConv(num_node_features, hidden_dim, heads=2, concat=True)
+        self.bn1 = BatchNorm(hidden_dim * 2)
+        # self.conv1 = GCNConv(num_node_features, hidden_dim)
+        self.conv2 = GCNConv(hidden_dim * 2, hidden_dim)
+        self.bn2 = BatchNorm(hidden_dim)
+        self.fc = nn.Linear(hidden_dim * 7, num_classes)
 
     def forward(self, data):
-        x, edge_index = data.x, data.edge_index
+        x, edge_index, batch = data.x, data.edge_index, data.batch
         batch_size = data.num_graphs
 
         x = self.conv1(x, edge_index)
+        x = self.bn1(x)
         x = F.relu(x)
         x = F.dropout(x, p=0.3, training=self.training)
-
+        
         x = self.conv2(x, edge_index)
+        x = self.bn2(x)
         x = F.relu(x)
         x = F.dropout(x, p=0.3, training=self.training)
 
         x = x.view(batch_size, -1)
+
+        # x_mean = global_mean_pool(x, batch)
+        # x_max = global_max_pool(x, batch)
+
+        # x = torch.cat([x_mean, x_max], dim=1)
 
         out = self.fc(x)
         return out
@@ -68,14 +78,14 @@ def load_raw_data_dict():
     # print(struct_edge_index)
 
     raw_data_dict = {'AD':[], 'NC':[]}
-    files = sorted([f for f in os.listdir(PROCESSED_DIR) if f.endswith('_features.csv')])
+    files = sorted([f for f in os.listdir(PROCESSED_DIR) if f.endswith('_features.npy')])
     
     print(f">>> Đang tải dữ liệu từ {len(files)} subjects...")
     for f in files:
         sub_id = f.split('_')[0]
         if sub_id not in sub_label_map:
             continue
-        features_raw = pd.read_csv(os.path.join(PROCESSED_DIR, f), header=None).values
+        features_raw = np.load(os.path.join(PROCESSED_DIR, f))
         features_raw = np.nan_to_num(features_raw, nan=0.0)
         raw_data_dict[sub_label_map[sub_id]].append({
             'features': features_raw,
@@ -112,9 +122,11 @@ def create_dataloaders(raw_data_dict, struct_edge_index, train_indices, val_indi
 
             n_segs = feats_scaled.shape[0]
 
-            features_3d = feats_scaled.reshape(n_segs, 19, 5)
+            features_3d = feats_scaled.reshape(n_segs, 7, 5)
 
             y_label = 0 if sub['id'] in ad_ids else 1
+
+            # y_label = random.choice([0, 1])
 
             if y_label == 0:
                 cnt_0 += 1
@@ -265,19 +277,17 @@ def main():
                 print(f"Lỗi: {e}")
             print("==============================\n")
 
-        optimizer = torch.optim.Adam(model.parameters(), lr=0.0005, weight_decay=1e-4)
+        optimizer = torch.optim.Adam(model.parameters(), lr=0.0001, weight_decay=1e-4)
         criterion = nn.CrossEntropyLoss()
 
         best_acc = 0.0
-
         for epoch in range(50):
             t_loss, t_acc = train_epoch(model, train_loader, criterion, optimizer, device)
             v_acc, v_f1 = evaluate(model, val_loader, device)
-
             if v_acc > best_acc:
                 best_acc = v_acc
             
-            print(f"Epoch {epoch:02d} | Loss: {t_loss:.4f} | Train Acc: {t_acc:.4f} | Val Acc: {v_acc:.4f} | Val F1: {v_f1:.4f} | Best Val: {best_acc:.4f}")
+            print(f"Epoch {epoch:02d} | Loss: {t_loss:.7f} | Train Acc: {t_acc:.7f} | Val Acc: {v_acc:.7f} | Val F1: {v_f1:.7f} | Best Val: {best_acc:.7f}")
 
         best_vals.append(best_acc)
     print(f"\nAverage Val Acc: {sum(best_vals) / len(best_vals)}")

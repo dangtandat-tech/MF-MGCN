@@ -36,17 +36,17 @@ DURATION_LIMIT = 300
 
 # [cite_start]Danh sách 19 kênh chuẩn theo hệ thống 10-20 [cite: 304]
 STANDARD_CHANNELS = [
-    'Fp1', 'Fp2', 'F7', 'F3', 'Fz', 'F4', 'F8', 
-    'T3', 'C3', 'Cz', 'C4', 'T4', 'T5', 'P3', 
-    'Pz', 'P4', 'T6', 'O1', 'O2'
+    'Fp1', 'Fp2',
+    'T3', 'C3', 'P3', 
+    'O1', 'O2'
 ]
 
 # [cite_start]Định nghĩa vùng não [cite: 287, 288]
 BRAIN_REGIONS = {
-    'Frontal': ['Fp1', 'Fp2', 'F7', 'F3', 'Fz', 'F4', 'F8'],
-    'Central': ['C3', 'Cz', 'C4'],
-    'Parietal': ['P3', 'Pz', 'P4'],
-    'Temporal': ['T3', 'T4', 'T5', 'T6'],
+    'Frontal': ['Fp1', 'Fp2'],
+    'Central': ['C3'],
+    'Parietal': ['P3'],
+    'Temporal': ['T3'],
     'Occipital': ['O1', 'O2']
 }
 
@@ -132,7 +132,7 @@ def process_one_subject(file_path, save_dir, sub_id):
         available_chans = raw.info['ch_names']
         picks = [ch for ch in STANDARD_CHANNELS if ch in available_chans]
         
-        if len(picks) < 19:
+        if len(picks) < 7:
             print(f"BỎ QUA {sub_id}: Thiếu kênh (Tìm thấy {len(picks)}/19).")
             return
 

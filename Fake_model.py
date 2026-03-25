@@ -6,7 +6,7 @@ import pandas as pd
 import numpy as np
 import random
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import f1_score, accuracy_score
+from sklearn.metrics import f1_score, accuracy_score, recall_score
 from torch_geometric.nn import GCNConv, GATConv, BatchNorm, global_mean_pool, global_max_pool
 from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader
@@ -21,12 +21,19 @@ def seed_everything(seed=42):
 class SimpleGCN(nn.Module):
     def __init__(self, num_node_features=5, hidden_dim=16, num_classes=2):
         super().__init__()
+
         self.conv1 = GATConv(num_node_features, hidden_dim, heads=2, concat=True)
         self.bn1 = BatchNorm(hidden_dim * 2)
         # self.conv1 = GCNConv(num_node_features, hidden_dim)
+
         self.conv2 = GCNConv(hidden_dim * 2, hidden_dim)
         self.bn2 = BatchNorm(hidden_dim)
-        self.fc = nn.Linear(hidden_dim * 7, num_classes)
+
+        # self.conv3 = GCNConv(hidden_dim, hidden_dim)
+        # self.bn3 = BatchNorm(hidden_dim)
+
+        # self.fc1 = nn.Linear(hidden_dim * 7, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim * 7, num_classes)
 
     def forward(self, data):
         x, edge_index, batch = data.x, data.edge_index, data.batch
@@ -35,12 +42,19 @@ class SimpleGCN(nn.Module):
         x = self.conv1(x, edge_index)
         x = self.bn1(x)
         x = F.relu(x)
-        x = F.dropout(x, p=0.3, training=self.training)
-        
+        x = F.dropout(x, p=0.35, training=self.training)
+
         x = self.conv2(x, edge_index)
         x = self.bn2(x)
         x = F.relu(x)
-        x = F.dropout(x, p=0.3, training=self.training)
+        x = F.dropout(x, p=0.35, training=self.training)
+        # x1 = x
+
+        # x = self.conv3(x, edge_index)
+        # x = self.bn3(x)
+        # x = F.relu(x)
+        # x = F.dropout(x, p=0.35, training=self.training)
+        # x = x + x1
 
         x = x.view(batch_size, -1)
 
@@ -49,7 +63,8 @@ class SimpleGCN(nn.Module):
 
         # x = torch.cat([x_mean, x_max], dim=1)
 
-        out = self.fc(x)
+        # x = self.fc1(x)
+        out = self.fc2(x)
         return out
     
 def load_raw_data_dict():
@@ -175,21 +190,23 @@ def train_epoch(model, loader, criterion, optimizer, device):
 
     return total_loss / total_samples, total_correct / total_samples
 
-def evaluate(model, loader, device):
+def evaluate(model, loader, criterion, device):
     model.eval()
     
     # patient_preds = defaultdict(list)
     # patient_trues = defaultdict(int)
-    
+    # total_samples, total_loss = 0, 0
+
     # with torch.no_grad():
     #     for data in loader:
     #         data = data.to(device)
     #         out = model(data)
+    #         loss = criterion(out, data.y)
     #         preds = out.argmax(dim=1).cpu().tolist()
     #         trues =  data.y.cpu().tolist()
-
     #         sub_ids = data.sub_id
-
+    #         total_loss += loss.item() * data.num_graphs
+    #         total_samples += data.num_graphs
     #         for i in range(len(sub_ids)):
     #             sub_id = sub_ids[i]
     #             patient_preds[sub_id].append(preds[i])
@@ -207,26 +224,32 @@ def evaluate(model, loader, device):
     #     final_preds.append(final_vote)
     #     final_trues.append(patient_trues[sub_id])
 
+    # loss = total_loss / total_samples
     # acc = accuracy_score(final_trues, final_preds)
     # f1 = f1_score(final_trues, final_preds, average='macro', zero_division=0)
-    # return acc, f1
+    # recall = recall_score(final_trues, final_preds, average='macro', zero_division=0)
+    # return acc, f1, recall
 
-    total_correct, total_samples = 0, 0
+    total_correct, total_samples, total_loss = 0, 0, 0
     all_targets, all_preds = [], []
     
     with torch.no_grad():
         for data in loader:
             data = data.to(device)
             out = model(data)
+            loss = criterion(out, data.y)
             pred = out.argmax(dim=1)
+            total_loss += loss.item() * data.num_graphs
             total_correct += (pred == data.y).sum().item()
             total_samples += data.num_graphs
             all_targets.extend(data.y.cpu().tolist())
             all_preds.extend(pred.cpu().tolist())
         
     acc = total_correct / total_samples
+    loss = total_loss / total_samples
     f1 = f1_score(all_targets, all_preds, average='macro', zero_division=0)
-    return acc, f1
+    recall = recall_score(all_targets, all_preds, average='macro', zero_division=0)
+    return acc, f1, recall, loss
 
 def main():
     seed_everything(42)
@@ -235,24 +258,21 @@ def main():
 
     raw_data_dict, struct_edge_index = load_raw_data_dict()
 
-    folds_indices = [
-        # Fold 1 (Nguyên bản của bạn)
-        ([21, 2, 24, 11, 19, 30, 14, 35, 27, 0, 3, 10, 6, 12, 31, 4, 32, 25, 33, 13, 7, 28, 26, 9, 18, 8, 23, 1, 5], 
-         [15, 22, 17, 20, 34, 16, 29], 
-         [17, 25, 19, 0, 3, 16, 10, 6, 12, 2, 4, 22, 13, 7, 9, 18, 28, 8, 1, 5, 23, 14, 26], 
-         [11, 21, 27, 15, 20, 24]),
-         
-        # Fold 2 (Tạo mới: Val AD có 7 người mới, Val NC có 6 người mới)
-        ([15, 22, 17, 20, 34, 16, 29, 35, 27, 0, 3, 10, 6, 12, 31, 4, 32, 25, 33, 13, 7, 28, 26, 9, 18, 8, 23, 1, 5],
-         [21, 2, 24, 11, 19, 30, 14],
-         [11, 21, 27, 15, 20, 24, 10, 6, 12, 2, 4, 22, 13, 7, 9, 18, 28, 8, 1, 5, 23, 14, 26],
-         [17, 25, 19, 0, 3, 16]),
-
-        # Fold 3 (Tạo mới: Val AD có 7 người mới, Val NC có 6 người mới)
-        ([15, 22, 17, 20, 34, 16, 29, 21, 2, 24, 11, 19, 30, 14, 31, 4, 32, 25, 33, 13, 7, 28, 26, 9, 18, 8, 23, 1, 5],
-         [35, 27, 0, 3, 10, 6, 12],
-         [11, 21, 27, 15, 20, 24, 17, 25, 19, 0, 3, 16, 13, 7, 9, 18, 28, 8, 1, 5, 23, 14, 26],
-         [10, 6, 12, 2, 4, 22])
+    folds_indices = [        
+        # Fold 0
+        ([21, 2, 24, 11, 19, 30, 14, 35, 27, 0, 3, 10, 6, 12, 31, 4, 32, 25, 33, 13, 7, 28, 26, 9, 18, 8, 23, 1, 5], [15, 22, 17, 20, 34, 16, 29], [17, 25, 19, 0, 3, 16, 10, 6, 12, 2, 4, 22, 13, 7, 9, 18, 28, 8, 1, 5, 23, 14, 26], [11, 21, 27, 15, 20, 24]),
+        # Fold 1
+        ([18, 35, 32, 11, 2, 7, 5, 4, 22, 25, 13, 14, 6, 21, 26, 29, 9, 19, 1, 23, 12, 17, 20, 24, 15, 10, 31, 30, 0], [34, 16, 3, 28, 27, 33, 8], [8, 13, 5, 4, 21, 23, 16, 28, 14, 6, 22, 18, 9, 19, 1, 12, 17, 20, 24, 15, 10, 0, 7], [11, 3, 27, 26, 25, 2]),
+        # Fold 2
+        ([0, 1, 3, 4, 5, 7, 8, 9, 11, 12, 13, 14, 16, 17, 18, 19, 20, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 33, 35], [2, 6, 10, 15, 21, 32, 34], [0, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 14, 17, 18, 19, 21, 22, 23, 24, 25, 26, 28], [1, 10, 15, 16, 20, 27]),
+        # Fold 3
+        ([1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 14, 15, 18, 19, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 34, 35], [0, 7, 13, 16, 17, 20, 33], [0, 1, 3, 4, 5, 6, 7, 8, 10, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 26, 27, 28], [2, 9, 11, 24, 25]),
+        # Fold 4
+        ([1, 2, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 34, 35], [0, 3, 4, 6, 16, 22, 33], [0, 1, 3, 4, 5, 6, 8, 10, 11, 12, 14, 15, 16, 17, 18, 19, 21, 22, 23, 24, 25, 26, 28], [2, 7, 9, 13, 20, 27]),
+        # Fold 5
+        ([15, 22, 17, 20, 34, 16, 29, 35, 27, 0, 3, 10, 6, 12, 31, 4, 32, 25, 33, 13, 7, 28, 26, 9, 18, 8, 23, 1, 5], [21, 2, 24, 11, 19, 30, 14], [11, 21, 27, 15, 20, 24, 10, 6, 12, 2, 4, 22, 13, 7, 9, 18, 28, 8, 1, 5, 23, 14, 26], [17, 25, 19, 0, 3, 16]),
+        # Fold 6
+        ([15, 22, 17, 20, 34, 16, 29, 21, 2, 24, 11, 19, 30, 14, 31, 4, 32, 25, 33, 13, 7, 28, 26, 9, 18, 8, 23, 1, 5], [35, 27, 0, 3, 10, 6, 12], [11, 21, 27, 15, 20, 24, 17, 25, 19, 0, 3, 16, 13, 7, 9, 18, 28, 8, 1, 5, 23, 14, 26], [10, 6, 12, 2, 4, 22])
     ]
 
     print("===== Bắt đầu Training =====")
@@ -277,17 +297,29 @@ def main():
                 print(f"Lỗi: {e}")
             print("==============================\n")
 
-        optimizer = torch.optim.Adam(model.parameters(), lr=0.0001, weight_decay=1e-4)
+        optimizer = torch.optim.Adam(model.parameters(), lr=0.00005, weight_decay=5e-4)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=5)
         criterion = nn.CrossEntropyLoss()
 
         best_acc = 0.0
-        for epoch in range(50):
+        patience = 15
+        patience_counter = 0
+        for epoch in range(100):
             t_loss, t_acc = train_epoch(model, train_loader, criterion, optimizer, device)
-            v_acc, v_f1 = evaluate(model, val_loader, device)
+            v_acc, v_f1, v_recall, v_loss = evaluate(model, val_loader, criterion, device)
+            scheduler.step(v_acc)
             if v_acc > best_acc:
                 best_acc = v_acc
+                patience_counter = 0
+            else:
+                patience_counter += 1
             
-            print(f"Epoch {epoch:02d} | Loss: {t_loss:.7f} | Train Acc: {t_acc:.7f} | Val Acc: {v_acc:.7f} | Val F1: {v_f1:.7f} | Best Val: {best_acc:.7f}")
+            lr = optimizer.param_groups[0]['lr']
+            print(f"Epoch {epoch:02d}| Lr: {lr:.8f}| Tr Loss: {t_loss:.7f}| Tr Acc: {t_acc:.7f}| Val Loss: {v_loss:.7f}| Val Acc: {v_acc:.7f}| Val F1: {v_f1:.7f}| Val Recall: {v_recall:.7f}| Best Val: {best_acc:.7f}")
+            
+            if patience_counter >= patience:
+                print(f"Early Stopping tại Epoch {epoch}")
+                break
 
         best_vals.append(best_acc)
     print(f"\nAverage Val Acc: {sum(best_vals) / len(best_vals)}")

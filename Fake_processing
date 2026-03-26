@@ -7,6 +7,7 @@ import warnings
 import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.preprocessing import StandardScaler
+import sys
 
 # Tắt cảnh báo MNE không cần thiết để output gọn gàng
 warnings.filterwarnings("ignore")
@@ -35,18 +36,14 @@ OVERLAP = 0.9
 DURATION_LIMIT = 300  
 
 # [cite_start]Danh sách 19 kênh chuẩn theo hệ thống 10-20 [cite: 304]
-STANDARD_CHANNELS = [
-    'Fp1', 'Fp2',
-    'T3', 'C3', 'P3', 
-    'O1', 'O2'
-]
+STANDARD_CHANNELS = sys.argv[1:]
 
 # [cite_start]Định nghĩa vùng não [cite: 287, 288]
 BRAIN_REGIONS = {
-    'Frontal': ['Fp1', 'Fp2'],
-    'Central': ['C3'],
-    'Parietal': ['P3'],
-    'Temporal': ['T3'],
+    'Frontal': ['Fp1', 'Fp2', 'F7', 'F3', 'Fz', 'F4', 'F8'],
+    'Central': ['C3', 'Cz', 'C4'],
+    'Parietal': ['P3', 'Pz', 'P4'],
+    'Temporal': ['T3', 'T4', 'T5', 'T6'],
     'Occipital': ['O1', 'O2']
 }
 
@@ -132,7 +129,7 @@ def process_one_subject(file_path, save_dir, sub_id):
         available_chans = raw.info['ch_names']
         picks = [ch for ch in STANDARD_CHANNELS if ch in available_chans]
         
-        if len(picks) < 7:
+        if len(picks) < 3:
             print(f"BỎ QUA {sub_id}: Thiếu kênh (Tìm thấy {len(picks)}/19).")
             return
 
@@ -238,19 +235,19 @@ def process_one_subject(file_path, save_dir, sub_id):
         
         print(f"Finished {sub_id}: Segments={n_segs} | Shape={features_flat.shape}")
 
-        if sub_id == "sub-001": 
-            # Lấy sfreq thực tế từ file data
-            current_sfreq = raw.info['sfreq'] 
+        # if sub_id == "sub-001": 
+        #     # Lấy sfreq thực tế từ file data
+        #     current_sfreq = raw.info['sfreq'] 
             
-            visualize_processing_results(
-                raw_data=raw.get_data(), 
-                filtered_data_dict=filtered_signals, # Truyền Dictionary, KHÔNG truyền string "beta"
-                de_features=all_features, 
-                adj_matrix=adj_multiband, 
-                sub_id=sub_id,
-                sfreq=current_sfreq,
-                target_band='Alpha' # Bạn có thể đổi thành 'Alpha' hoặc 'Gamma' tùy ý
-            )
+        #     visualize_processing_results(
+        #         raw_data=raw.get_data(), 
+        #         filtered_data_dict=filtered_signals, # Truyền Dictionary, KHÔNG truyền string "beta"
+        #         de_features=all_features, 
+        #         adj_matrix=adj_multiband, 
+        #         sub_id=sub_id,
+        #         sfreq=current_sfreq,
+        #         target_band='Alpha' # Bạn có thể đổi thành 'Alpha' hoặc 'Gamma' tùy ý
+        #     )
 
     except Exception as e:
         print(f"FAILED {sub_id}: {str(e)}")

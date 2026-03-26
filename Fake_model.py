@@ -12,6 +12,8 @@ from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader
 from torch_geometric.nn import summary
 from collections import defaultdict
+import csv
+import sys
 
 def seed_everything(seed=42):
     random.seed(seed)
@@ -32,8 +34,8 @@ class SimpleGCN(nn.Module):
         # self.conv3 = GCNConv(hidden_dim, hidden_dim)
         # self.bn3 = BatchNorm(hidden_dim)
 
-        # self.fc1 = nn.Linear(hidden_dim * 7, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim * 7, num_classes)
+        self.fc1 = nn.Linear(hidden_dim * 3, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, num_classes)
 
     def forward(self, data):
         x, edge_index, batch = data.x, data.edge_index, data.batch
@@ -63,7 +65,7 @@ class SimpleGCN(nn.Module):
 
         # x = torch.cat([x_mean, x_max], dim=1)
 
-        # x = self.fc1(x)
+        x = self.fc1(x)
         out = self.fc2(x)
         return out
     
@@ -137,7 +139,7 @@ def create_dataloaders(raw_data_dict, struct_edge_index, train_indices, val_indi
 
             n_segs = feats_scaled.shape[0]
 
-            features_3d = feats_scaled.reshape(n_segs, 7, 5)
+            features_3d = feats_scaled.reshape(n_segs, 3, 5)
 
             y_label = 0 if sub['id'] in ad_ids else 1
 
@@ -252,6 +254,12 @@ def evaluate(model, loader, criterion, device):
     return acc, f1, recall, loss
 
 def main():
+    
+    STANDARD_CHANNELS = sys.argv[1:]
+
+    file_path = "Result_selected.csv"
+    file_exists = os.path.isfile(file_path)
+
     seed_everything(42)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Sử dụng device: {device}")
@@ -302,7 +310,7 @@ def main():
         criterion = nn.CrossEntropyLoss()
 
         best_acc = 0.0
-        patience = 15
+        patience = 30
         patience_counter = 0
         for epoch in range(100):
             t_loss, t_acc = train_epoch(model, train_loader, criterion, optimizer, device)
@@ -322,6 +330,17 @@ def main():
                 break
 
         best_vals.append(best_acc)
+    
+    full_row = STANDARD_CHANNELS + best_vals + [sum(best_vals) / len(best_vals)]
+    with open(file_path, 'a', newline='') as f:
+        writer = csv.writer(f)
+
+        if not file_exists:
+            header = ['Ch1', 'Ch2', 'Ch3', 'Fold 0', 'Fold 1', 'Fold 2', 'Fold 3', 'Fold 4', 'Fold 5', 'Fold 6', 'ACC AVG']
+            writer.writerow(header)
+
+        writer.writerow(full_row)
+
     print(f"\nAverage Val Acc: {sum(best_vals) / len(best_vals)}")
 if __name__ == '__main__':
     main()

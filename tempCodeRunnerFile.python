@@ -1,0 +1,13 @@
+        # if sub_id == "sub-001": 
+        #     # Lấy sfreq thực tế từ file data
+        #     current_sfreq = raw.info['sfreq'] 
+            
+        #     visualize_processing_results(
+        #         raw_data=raw.get_data(), 
+        #         filtered_data_dict=filtered_signals, # Truyền Dictionary, KHÔNG truyền string "beta"
+        #         de_features=all_features, 
+        #         adj_matrix=adj_multiband, 
+        #         sub_id=sub_id,
+        #         sfreq=current_sfreq,
+        #         target_band='Alpha' # Bạn có thể đổi thành 'Alpha' hoặc 'Gamma' tùy ý
+        #     )

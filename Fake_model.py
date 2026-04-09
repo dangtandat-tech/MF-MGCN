@@ -1,346 +1,664 @@
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import os
-import pandas as pd
-import numpy as np
-import random
-from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import f1_score, accuracy_score, recall_score
-from torch_geometric.nn import GCNConv, GATConv, BatchNorm, global_mean_pool, global_max_pool
-from torch_geometric.data import Data
-from torch_geometric.loader import DataLoader
-from torch_geometric.nn import summary
-from collections import defaultdict
-import csv
-import sys
-
-def seed_everything(seed=42):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-
-class SimpleGCN(nn.Module):
-    def __init__(self, num_node_features=5, hidden_dim=16, num_classes=2):
-        super().__init__()
-
-        self.conv1 = GATConv(num_node_features, hidden_dim, heads=2, concat=True)
-        self.bn1 = BatchNorm(hidden_dim * 2)
-        # self.conv1 = GCNConv(num_node_features, hidden_dim)
-
-        self.conv2 = GCNConv(hidden_dim * 2, hidden_dim)
-        self.bn2 = BatchNorm(hidden_dim)
-
-        # self.conv3 = GCNConv(hidden_dim, hidden_dim)
-        # self.bn3 = BatchNorm(hidden_dim)
-
-        self.fc1 = nn.Linear(hidden_dim * 3, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, num_classes)
-
-    def forward(self, data):
-        x, edge_index, batch = data.x, data.edge_index, data.batch
-        batch_size = data.num_graphs
-
-        x = self.conv1(x, edge_index)
-        x = self.bn1(x)
-        x = F.relu(x)
-        x = F.dropout(x, p=0.35, training=self.training)
-
-        x = self.conv2(x, edge_index)
-        x = self.bn2(x)
-        x = F.relu(x)
-        x = F.dropout(x, p=0.35, training=self.training)
-        # x1 = x
-
-        # x = self.conv3(x, edge_index)
-        # x = self.bn3(x)
-        # x = F.relu(x)
-        # x = F.dropout(x, p=0.35, training=self.training)
-        # x = x + x1
-
-        x = x.view(batch_size, -1)
-
-        # x_mean = global_mean_pool(x, batch)
-        # x_max = global_max_pool(x, batch)
-
-        # x = torch.cat([x_mean, x_max], dim=1)
-
-        x = self.fc1(x)
-        out = self.fc2(x)
-        return out
-    
-def load_raw_data_dict():
-    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-    PROCESSED_DIR = os.path.join(BASE_DIR, "processed_data")
-    tsv_path = os.path.join(BASE_DIR, "participants.tsv")
-
-    try:
-        df = pd.read_csv(tsv_path, sep='\t')
-    except:
-        df = pd.read_csv(tsv_path, sep='\s+')
-    
-    sub_label_map = {}
-    for _, row in df.iterrows():
-        sub = row['participant_id']
-        grp = str(row['Group']).strip()
-        
-        if grp == 'A':
-            sub_label_map[sub] = 'AD'
-        elif grp == 'C':
-            sub_label_map[sub] = 'NC'
-    
-    struct_adj = pd.read_csv(os.path.join(PROCESSED_DIR, "structural_adjacency.csv"), header=None).values
-    # print(struct_adj)
-    struct_edge_index = torch.tensor(struct_adj, dtype=torch.float32).nonzero().t().contiguous()
-    # print(struct_edge_index)
-
-    raw_data_dict = {'AD':[], 'NC':[]}
-    files = sorted([f for f in os.listdir(PROCESSED_DIR) if f.endswith('_features.npy')])
-    
-    print(f">>> Đang tải dữ liệu từ {len(files)} subjects...")
-    for f in files:
-        sub_id = f.split('_')[0]
-        if sub_id not in sub_label_map:
-            continue
-        features_raw = np.load(os.path.join(PROCESSED_DIR, f))
-        features_raw = np.nan_to_num(features_raw, nan=0.0)
-        raw_data_dict[sub_label_map[sub_id]].append({
-            'features': features_raw,
-            'id': sub_id
-        })
-    
-    return raw_data_dict, struct_edge_index
-
-def create_dataloaders(raw_data_dict, struct_edge_index, train_indices, val_indices, batch_size=10):
-    scaler = StandardScaler()
-    ad_list, nc_list = raw_data_dict['AD'], raw_data_dict['NC']
-    ad_ids = {item['id'] for item in ad_list}
-    
-    def get_subs(indices, source_list):
-        return [source_list[i] for i in indices if i < len(source_list)]
-    
-    train_subs = get_subs(train_indices['AD'], ad_list) + get_subs(train_indices['NC'], nc_list)
-    val_subs = get_subs(val_indices['AD'], ad_list) + get_subs(val_indices['NC'], nc_list)
-
-    if not train_subs:
-        print(f"Data tập Train bị rỗng!!!")
-        return None, None
-
-    all_train_data = np.vstack([sub['features'] for sub in train_subs])
-    scaler.fit(all_train_data)
-
-    def convert_to_pyg(sub_list):
-        data_list = []
-        cnt_0, cnt_1 = 0, 0
-        for sub in sub_list:
-            # print(sub['features'])
-            feats_scaled = np.nan_to_num(scaler.transform(sub['features']))
-            # print(feats_scaled)
-
-            n_segs = feats_scaled.shape[0]
-
-            features_3d = feats_scaled.reshape(n_segs, 3, 5)
-
-            y_label = 0 if sub['id'] in ad_ids else 1
-
-            # y_label = random.choice([0, 1])
-
-            if y_label == 0:
-                cnt_0 += 1
-            else:
-                cnt_1 +=1
-
-            for i in range(n_segs):
-                x = torch.tensor(features_3d[i], dtype=torch.float32)
-                y = torch.tensor([y_label],dtype=torch.long)
-                data = Data(x=x, y= y, edge_index=struct_edge_index, sub_id=sub['id'])
-                data_list.append(data)
-        
-        print(f"Label 0: {cnt_0}")
-        print(f"Label 1: {cnt_1}")
-        
-        return data_list
-    
-    train_loader = DataLoader(
-        convert_to_pyg(train_subs),
-        batch_size = batch_size,
-        shuffle = True
-    )
-    val_loader = DataLoader(
-        convert_to_pyg(val_subs),
-        batch_size = batch_size,
-        shuffle = False
-    )
-    return train_loader, val_loader
-
-def train_epoch(model, loader, criterion, optimizer, device):
-    model.train()
-    total_loss, total_correct, total_samples = 0, 0, 0
-    
-    for data in loader:
-        data = data.to(device)
-        optimizer.zero_grad()
-        
-        out = model(data)
-        loss = criterion(out, data.y)
-        loss.backward()
-        optimizer.step()
-
-        total_loss += loss.item() * data.num_graphs
-        total_correct += (out.argmax(dim=1) == data.y).sum().item()
-        total_samples += data.num_graphs
-
-    return total_loss / total_samples, total_correct / total_samples
-
-def evaluate(model, loader, criterion, device):
-    model.eval()
-    
-    # patient_preds = defaultdict(list)
-    # patient_trues = defaultdict(int)
-    # total_samples, total_loss = 0, 0
-
-    # with torch.no_grad():
-    #     for data in loader:
-    #         data = data.to(device)
-    #         out = model(data)
-    #         loss = criterion(out, data.y)
-    #         preds = out.argmax(dim=1).cpu().tolist()
-    #         trues =  data.y.cpu().tolist()
-    #         sub_ids = data.sub_id
-    #         total_loss += loss.item() * data.num_graphs
-    #         total_samples += data.num_graphs
-    #         for i in range(len(sub_ids)):
-    #             sub_id = sub_ids[i]
-    #             patient_preds[sub_id].append(preds[i])
-    #             patient_trues[sub_id] = trues[i]
-    
-    # final_preds = []
-    # final_trues = []
-
-    # for sub_id, preds_list in patient_preds.items():
-    #     count_0 = preds_list.count(0)
-    #     count_1 = preds_list.count(1)
-
-    #     final_vote = 1 if count_1 > count_0 else 0
-
-    #     final_preds.append(final_vote)
-    #     final_trues.append(patient_trues[sub_id])
-
-    # loss = total_loss / total_samples
-    # acc = accuracy_score(final_trues, final_preds)
-    # f1 = f1_score(final_trues, final_preds, average='macro', zero_division=0)
-    # recall = recall_score(final_trues, final_preds, average='macro', zero_division=0)
-    # return acc, f1, recall
-
-    total_correct, total_samples, total_loss = 0, 0, 0
-    all_targets, all_preds = [], []
-    
-    with torch.no_grad():
-        for data in loader:
-            data = data.to(device)
-            out = model(data)
-            loss = criterion(out, data.y)
-            pred = out.argmax(dim=1)
-            total_loss += loss.item() * data.num_graphs
-            total_correct += (pred == data.y).sum().item()
-            total_samples += data.num_graphs
-            all_targets.extend(data.y.cpu().tolist())
-            all_preds.extend(pred.cpu().tolist())
-        
-    acc = total_correct / total_samples
-    loss = total_loss / total_samples
-    f1 = f1_score(all_targets, all_preds, average='macro', zero_division=0)
-    recall = recall_score(all_targets, all_preds, average='macro', zero_division=0)
-    return acc, f1, recall, loss
-
-def main():
-    
-    STANDARD_CHANNELS = sys.argv[1:]
-
-    file_path = "Result_selected.csv"
-    file_exists = os.path.isfile(file_path)
-
-    seed_everything(42)
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Sử dụng device: {device}")
-
-    raw_data_dict, struct_edge_index = load_raw_data_dict()
-
-    folds_indices = [        
-        # Fold 0
-        ([21, 2, 24, 11, 19, 30, 14, 35, 27, 0, 3, 10, 6, 12, 31, 4, 32, 25, 33, 13, 7, 28, 26, 9, 18, 8, 23, 1, 5], [15, 22, 17, 20, 34, 16, 29], [17, 25, 19, 0, 3, 16, 10, 6, 12, 2, 4, 22, 13, 7, 9, 18, 28, 8, 1, 5, 23, 14, 26], [11, 21, 27, 15, 20, 24]),
-        # Fold 1
-        ([18, 35, 32, 11, 2, 7, 5, 4, 22, 25, 13, 14, 6, 21, 26, 29, 9, 19, 1, 23, 12, 17, 20, 24, 15, 10, 31, 30, 0], [34, 16, 3, 28, 27, 33, 8], [8, 13, 5, 4, 21, 23, 16, 28, 14, 6, 22, 18, 9, 19, 1, 12, 17, 20, 24, 15, 10, 0, 7], [11, 3, 27, 26, 25, 2]),
-        # Fold 2
-        ([0, 1, 3, 4, 5, 7, 8, 9, 11, 12, 13, 14, 16, 17, 18, 19, 20, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 33, 35], [2, 6, 10, 15, 21, 32, 34], [0, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 14, 17, 18, 19, 21, 22, 23, 24, 25, 26, 28], [1, 10, 15, 16, 20, 27]),
-        # Fold 3
-        ([1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 14, 15, 18, 19, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 34, 35], [0, 7, 13, 16, 17, 20, 33], [0, 1, 3, 4, 5, 6, 7, 8, 10, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 26, 27, 28], [2, 9, 11, 24, 25]),
-        # Fold 4
-        ([1, 2, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 34, 35], [0, 3, 4, 6, 16, 22, 33], [0, 1, 3, 4, 5, 6, 8, 10, 11, 12, 14, 15, 16, 17, 18, 19, 21, 22, 23, 24, 25, 26, 28], [2, 7, 9, 13, 20, 27]),
-        # Fold 5
-        ([15, 22, 17, 20, 34, 16, 29, 35, 27, 0, 3, 10, 6, 12, 31, 4, 32, 25, 33, 13, 7, 28, 26, 9, 18, 8, 23, 1, 5], [21, 2, 24, 11, 19, 30, 14], [11, 21, 27, 15, 20, 24, 10, 6, 12, 2, 4, 22, 13, 7, 9, 18, 28, 8, 1, 5, 23, 14, 26], [17, 25, 19, 0, 3, 16]),
-        # Fold 6
-        ([15, 22, 17, 20, 34, 16, 29, 21, 2, 24, 11, 19, 30, 14, 31, 4, 32, 25, 33, 13, 7, 28, 26, 9, 18, 8, 23, 1, 5], [35, 27, 0, 3, 10, 6, 12], [11, 21, 27, 15, 20, 24, 17, 25, 19, 0, 3, 16, 13, 7, 9, 18, 28, 8, 1, 5, 23, 14, 26], [10, 6, 12, 2, 4, 22])
-    ]
-
-    print("===== Bắt đầu Training =====")
-    best_vals = []
-    for fold_idx,  (tr_ad, val_ad, tr_nc, val_nc) in enumerate(folds_indices):
-        print(f"\n===== Đang xử lý Fold {fold_idx} =====")
-        train_loader, val_loader= create_dataloaders(
-            raw_data_dict,
-            struct_edge_index,
-            {'AD': tr_ad, 'NC': tr_nc},
-            {'AD': val_ad, 'NC': val_nc}
-        )
-
-        model = SimpleGCN().to(device)
-        dummy_data = next(iter(train_loader)).to(device)
-        
-        if fold_idx == 0:
-            try:
-                # PyG summary chỉ cần truyền model và các tham số đầu vào của hàm forward
-                print(summary(model, dummy_data))
-            except Exception as e:
-                print(f"Lỗi: {e}")
-            print("==============================\n")
-
-        optimizer = torch.optim.Adam(model.parameters(), lr=0.00005, weight_decay=5e-4)
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=5)
-        criterion = nn.CrossEntropyLoss()
-
-        best_acc = 0.0
-        patience = 30
-        patience_counter = 0
-        for epoch in range(100):
-            t_loss, t_acc = train_epoch(model, train_loader, criterion, optimizer, device)
-            v_acc, v_f1, v_recall, v_loss = evaluate(model, val_loader, criterion, device)
-            scheduler.step(v_acc)
-            if v_acc > best_acc:
-                best_acc = v_acc
-                patience_counter = 0
-            else:
-                patience_counter += 1
-            
-            lr = optimizer.param_groups[0]['lr']
-            print(f"Epoch {epoch:02d}| Lr: {lr:.8f}| Tr Loss: {t_loss:.7f}| Tr Acc: {t_acc:.7f}| Val Loss: {v_loss:.7f}| Val Acc: {v_acc:.7f}| Val F1: {v_f1:.7f}| Val Recall: {v_recall:.7f}| Best Val: {best_acc:.7f}")
-            
-            if patience_counter >= patience:
-                print(f"Early Stopping tại Epoch {epoch}")
-                break
-
-        best_vals.append(best_acc)
-    
-    full_row = STANDARD_CHANNELS + best_vals + [sum(best_vals) / len(best_vals)]
-    with open(file_path, 'a', newline='') as f:
-        writer = csv.writer(f)
-
-        if not file_exists:
-            header = ['Ch1', 'Ch2', 'Ch3', 'Fold 0', 'Fold 1', 'Fold 2', 'Fold 3', 'Fold 4', 'Fold 5', 'Fold 6', 'ACC AVG']
-            writer.writerow(header)
-
-        writer.writerow(full_row)
-
-    print(f"\nAverage Val Acc: {sum(best_vals) / len(best_vals)}")
-if __name__ == '__main__':
-    main()
+{
+ "cells": [
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "id": "df3bf5cd",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-04-09T05:22:08.784809Z",
+     "iopub.status.busy": "2026-04-09T05:22:08.784509Z",
+     "iopub.status.idle": "2026-04-09T05:22:18.490312Z",
+     "shell.execute_reply": "2026-04-09T05:22:18.489341Z"
+    },
+    "papermill": {
+     "duration": 9.710552,
+     "end_time": "2026-04-09T05:22:18.492181+00:00",
+     "exception": false,
+     "start_time": "2026-04-09T05:22:08.781629+00:00",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Collecting torch_geometric\r\n",
+      "  Downloading torch_geometric-2.7.0-py3-none-any.whl.metadata (63 kB)\r\n",
+      "\u001b[2K     \u001b[90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\u001b[0m \u001b[32m63.7/63.7 kB\u001b[0m \u001b[31m2.8 MB/s\u001b[0m eta \u001b[36m0:00:00\u001b[0m\r\n",
+      "\u001b[?25hRequirement already satisfied: aiohttp in /usr/local/lib/python3.12/dist-packages (from torch_geometric) (3.13.3)\r\n",
+      "Requirement already satisfied: fsspec in /usr/local/lib/python3.12/dist-packages (from torch_geometric) (2026.2.0)\r\n",
+      "Requirement already satisfied: jinja2 in /usr/local/lib/python3.12/dist-packages (from torch_geometric) (3.1.6)\r\n",
+      "Requirement already satisfied: numpy in /usr/local/lib/python3.12/dist-packages (from torch_geometric) (2.0.2)\r\n",
+      "Requirement already satisfied: psutil>=5.8.0 in /usr/local/lib/python3.12/dist-packages (from torch_geometric) (5.9.5)\r\n",
+      "Requirement already satisfied: pyparsing in /usr/local/lib/python3.12/dist-packages (from torch_geometric) (3.3.2)\r\n",
+      "Requirement already satisfied: requests in /usr/local/lib/python3.12/dist-packages (from torch_geometric) (2.32.4)\r\n",
+      "Requirement already satisfied: tqdm in /usr/local/lib/python3.12/dist-packages (from torch_geometric) (4.67.3)\r\n",
+      "Requirement already satisfied: xxhash in /usr/local/lib/python3.12/dist-packages (from torch_geometric) (3.6.0)\r\n",
+      "Requirement already satisfied: aiohappyeyeballs>=2.5.0 in /usr/local/lib/python3.12/dist-packages (from aiohttp->torch_geometric) (2.6.1)\r\n",
+      "Requirement already satisfied: aiosignal>=1.4.0 in /usr/local/lib/python3.12/dist-packages (from aiohttp->torch_geometric) (1.4.0)\r\n",
+      "Requirement already satisfied: attrs>=17.3.0 in /usr/local/lib/python3.12/dist-packages (from aiohttp->torch_geometric) (25.4.0)\r\n",
+      "Requirement already satisfied: frozenlist>=1.1.1 in /usr/local/lib/python3.12/dist-packages (from aiohttp->torch_geometric) (1.8.0)\r\n",
+      "Requirement already satisfied: multidict<7.0,>=4.5 in /usr/local/lib/python3.12/dist-packages (from aiohttp->torch_geometric) (6.7.1)\r\n",
+      "Requirement already satisfied: propcache>=0.2.0 in /usr/local/lib/python3.12/dist-packages (from aiohttp->torch_geometric) (0.4.1)\r\n",
+      "Requirement already satisfied: yarl<2.0,>=1.17.0 in /usr/local/lib/python3.12/dist-packages (from aiohttp->torch_geometric) (1.22.0)\r\n",
+      "Requirement already satisfied: MarkupSafe>=2.0 in /usr/local/lib/python3.12/dist-packages (from jinja2->torch_geometric) (3.0.3)\r\n",
+      "Requirement already satisfied: charset_normalizer<4,>=2 in /usr/local/lib/python3.12/dist-packages (from requests->torch_geometric) (3.4.4)\r\n",
+      "Requirement already satisfied: idna<4,>=2.5 in /usr/local/lib/python3.12/dist-packages (from requests->torch_geometric) (3.11)\r\n",
+      "Requirement already satisfied: urllib3<3,>=1.21.1 in /usr/local/lib/python3.12/dist-packages (from requests->torch_geometric) (2.5.0)\r\n",
+      "Requirement already satisfied: certifi>=2017.4.17 in /usr/local/lib/python3.12/dist-packages (from requests->torch_geometric) (2026.1.4)\r\n",
+      "Requirement already satisfied: typing-extensions>=4.2 in /usr/local/lib/python3.12/dist-packages (from aiosignal>=1.4.0->aiohttp->torch_geometric) (4.15.0)\r\n",
+      "Downloading torch_geometric-2.7.0-py3-none-any.whl (1.3 MB)\r\n",
+      "\u001b[2K   \u001b[90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\u001b[0m \u001b[32m1.3/1.3 MB\u001b[0m \u001b[31m23.8 MB/s\u001b[0m eta \u001b[36m0:00:00\u001b[0m\r\n",
+      "\u001b[?25hInstalling collected packages: torch_geometric\r\n",
+      "Successfully installed torch_geometric-2.7.0\r\n",
+      "Looking in links: https://data.pyg.org/whl/torch-2.10.0+cu128.html\r\n",
+      "Collecting torch-scatter\r\n",
+      "  Downloading https://data.pyg.org/whl/torch-2.10.0%2Bcu128/torch_scatter-2.1.2%2Bpt210cu128-cp312-cp312-linux_x86_64.whl (10.9 MB)\r\n",
+      "\u001b[2K     \u001b[90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\u001b[0m \u001b[32m10.9/10.9 MB\u001b[0m \u001b[31m92.2 MB/s\u001b[0m eta \u001b[36m0:00:00\u001b[0m\r\n",
+      "\u001b[?25hInstalling collected packages: torch-scatter\r\n",
+      "Successfully installed torch-scatter-2.1.2+pt210cu128\r\n"
+     ]
+    }
+   ],
+   "source": [
+    "!pip install torch_geometric\n",
+    "!pip install torch-scatter -f https://data.pyg.org/whl/torch-2.10.0+cu128.html"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "id": "ee499db8",
+   "metadata": {
+    "_cell_guid": "0ad39be2-d511-405b-876c-b8c85a5e2c27",
+    "_uuid": "883f90f2-976d-453f-ab4a-90d1bfeb05b5",
+    "collapsed": false,
+    "execution": {
+     "iopub.execute_input": "2026-04-09T05:22:18.498576Z",
+     "iopub.status.busy": "2026-04-09T05:22:18.498178Z",
+     "iopub.status.idle": "2026-04-09T06:26:56.144019Z",
+     "shell.execute_reply": "2026-04-09T06:26:56.143080Z"
+    },
+    "jupyter": {
+     "outputs_hidden": false
+    },
+    "papermill": {
+     "duration": 3877.653015,
+     "end_time": "2026-04-09T06:26:56.147507+00:00",
+     "exception": false,
+     "start_time": "2026-04-09T05:22:18.494492+00:00",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Đang kiểm thử Tổ hợp: ['Fp1', 'Fp2', 'F7', 'F3', 'Fz', 'F4', 'F8', 'T3', 'C3', 'Cz', 'C4', 'T4', 'T5', 'P3', 'Pz', 'P4', 'T6', 'O1', 'O2'] (Indices: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18])\n",
+      "Sử dụng thiết bị: cuda\n",
+      ">>> Đang tải dữ liệu từ 88 subjects...\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "/tmp/ipykernel_24/271179883.py:112: ParserWarning: Falling back to the 'python' engine because the 'c' engine does not support regex separators (separators > 1 char and different from '\\s+' are interpreted as regex); you can avoid this warning by specifying engine='python'.\n",
+      "  df = pd.read_csv(tsv_path, sep=r'\\t')\n"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "===== Bắt đầu Training (Chế độ Voting: TẮT) =====\n",
+      "\n",
+      "===== Đang xử lý Fold 0 =====\n",
+      "Train Bệnh nhân: AD=23, NC=23\n",
+      "+-------------------------+--------------------------------+----------------+----------+\n",
+      "| Layer                   | Input Shape                    | Output Shape   | #Param   |\n",
+      "|-------------------------+--------------------------------+----------------+----------|\n",
+      "| DynamicGraphTransformer | [608, 608]                     | [32, 2]        | 78,146   |\n",
+      "| ├─(gat1)GATv2Conv       | [608, 8], [2, 288], [288, 1]   | [608, 128]     | 2,688    |\n",
+      "| ├─(norm1)GraphNorm      | [608, 128]                     | [608, 128]     | 384      |\n",
+      "| ├─(gat2)GATv2Conv       | [608, 128], [2, 288], [288, 1] | [608, 128]     | 33,408   |\n",
+      "| ├─(norm2)GraphNorm      | [608, 128]                     | [608, 128]     | 384      |\n",
+      "| ├─(fc1)Linear           | [32, 256]                      | [32, 128]      | 32,896   |\n",
+      "| ├─(fc2)Linear           | [32, 128]                      | [32, 64]       | 8,256    |\n",
+      "| ├─(fc3)Linear           | [32, 64]                       | [32, 2]        | 130      |\n",
+      "| ├─(dropout)Dropout      | [608, 128]                     | [608, 128]     | --       |\n",
+      "+-------------------------+--------------------------------+----------------+----------+\n",
+      "Epoch 00 | Tr Loss: 0.3571 | Tr Acc: 0.8473 | Val Acc: 0.6123 | Best Val: 0.6123\n",
+      "Epoch 10 | Tr Loss: 0.1060 | Tr Acc: 0.9606 | Val Acc: 0.8325 | Best Val: 0.8351\n",
+      "Epoch 20 | Tr Loss: 0.0868 | Tr Acc: 0.9671 | Val Acc: 0.8542 | Best Val: 0.8548\n",
+      "Epoch 30 | Tr Loss: 0.0654 | Tr Acc: 0.9758 | Val Acc: 0.8385 | Best Val: 0.8548\n",
+      "Epoch 40 | Tr Loss: 0.0550 | Tr Acc: 0.9789 | Val Acc: 0.8336 | Best Val: 0.8548\n",
+      "Epoch 50 | Tr Loss: 0.0500 | Tr Acc: 0.9814 | Val Acc: 0.8362 | Best Val: 0.8548\n",
+      "Epoch 60 | Tr Loss: 0.0453 | Tr Acc: 0.9833 | Val Acc: 0.8436 | Best Val: 0.8548\n",
+      "Epoch 70 | Tr Loss: 0.0388 | Tr Acc: 0.9858 | Val Acc: 0.8482 | Best Val: 0.8548\n",
+      "Epoch 80 | Tr Loss: 0.0353 | Tr Acc: 0.9872 | Val Acc: 0.8517 | Best Val: 0.8548\n",
+      "Epoch 90 | Tr Loss: 0.0381 | Tr Acc: 0.9848 | Val Acc: 0.8479 | Best Val: 0.8548\n",
+      "Epoch 99 | Tr Loss: 0.0372 | Tr Acc: 0.9859 | Val Acc: 0.8479 | Best Val: 0.8548\n",
+      "\n",
+      "===== Đang xử lý Fold 1 =====\n",
+      "Train Bệnh nhân: AD=29, NC=23\n",
+      "Epoch 00 | Tr Loss: 0.4867 | Tr Acc: 0.7497 | Val Acc: 0.6426 | Best Val: 0.6426\n",
+      "Epoch 10 | Tr Loss: 0.1680 | Tr Acc: 0.9315 | Val Acc: 0.8739 | Best Val: 0.8834\n",
+      "Epoch 20 | Tr Loss: 0.1131 | Tr Acc: 0.9557 | Val Acc: 0.7824 | Best Val: 0.8834\n",
+      "Epoch 30 | Tr Loss: 0.1007 | Tr Acc: 0.9614 | Val Acc: 0.8208 | Best Val: 0.8834\n",
+      "Epoch 40 | Tr Loss: 0.0958 | Tr Acc: 0.9627 | Val Acc: 0.8192 | Best Val: 0.8834\n",
+      "Epoch 50 | Tr Loss: 0.0867 | Tr Acc: 0.9666 | Val Acc: 0.8612 | Best Val: 0.8834\n",
+      "Epoch 60 | Tr Loss: 0.0801 | Tr Acc: 0.9690 | Val Acc: 0.8094 | Best Val: 0.8834\n",
+      "Epoch 70 | Tr Loss: 0.0756 | Tr Acc: 0.9709 | Val Acc: 0.8150 | Best Val: 0.8834\n",
+      "Epoch 80 | Tr Loss: 0.0763 | Tr Acc: 0.9701 | Val Acc: 0.8123 | Best Val: 0.8834\n",
+      "Epoch 90 | Tr Loss: 0.0738 | Tr Acc: 0.9709 | Val Acc: 0.8128 | Best Val: 0.8834\n",
+      "Epoch 99 | Tr Loss: 0.0722 | Tr Acc: 0.9725 | Val Acc: 0.8115 | Best Val: 0.8834\n",
+      "\n",
+      "===== Đang xử lý Fold 2 =====\n",
+      "Train Bệnh nhân: AD=29, NC=23\n",
+      "Epoch 00 | Tr Loss: 0.4715 | Tr Acc: 0.7651 | Val Acc: 0.6632 | Best Val: 0.6632\n",
+      "Epoch 10 | Tr Loss: 0.1628 | Tr Acc: 0.9347 | Val Acc: 0.7864 | Best Val: 0.8409\n",
+      "Epoch 20 | Tr Loss: 0.1130 | Tr Acc: 0.9557 | Val Acc: 0.7904 | Best Val: 0.8409\n",
+      "Epoch 30 | Tr Loss: 0.0922 | Tr Acc: 0.9627 | Val Acc: 0.7875 | Best Val: 0.8409\n",
+      "Epoch 40 | Tr Loss: 0.0833 | Tr Acc: 0.9662 | Val Acc: 0.8020 | Best Val: 0.8409\n",
+      "Epoch 50 | Tr Loss: 0.0789 | Tr Acc: 0.9695 | Val Acc: 0.7941 | Best Val: 0.8409\n",
+      "Epoch 60 | Tr Loss: 0.0723 | Tr Acc: 0.9696 | Val Acc: 0.8004 | Best Val: 0.8409\n",
+      "Epoch 70 | Tr Loss: 0.0754 | Tr Acc: 0.9705 | Val Acc: 0.7978 | Best Val: 0.8409\n",
+      "Epoch 80 | Tr Loss: 0.0724 | Tr Acc: 0.9706 | Val Acc: 0.7970 | Best Val: 0.8409\n",
+      "Epoch 90 | Tr Loss: 0.0733 | Tr Acc: 0.9715 | Val Acc: 0.7988 | Best Val: 0.8409\n",
+      "Epoch 99 | Tr Loss: 0.0709 | Tr Acc: 0.9730 | Val Acc: 0.8023 | Best Val: 0.8409\n",
+      "\n",
+      "===== Đang xử lý Fold 3 =====\n",
+      "Train Bệnh nhân: AD=29, NC=24\n",
+      "Epoch 00 | Tr Loss: 0.4632 | Tr Acc: 0.7696 | Val Acc: 0.6186 | Best Val: 0.6186\n",
+      "Epoch 10 | Tr Loss: 0.1399 | Tr Acc: 0.9420 | Val Acc: 0.6962 | Best Val: 0.7872\n",
+      "Epoch 20 | Tr Loss: 0.1075 | Tr Acc: 0.9586 | Val Acc: 0.6784 | Best Val: 0.7872\n",
+      "Epoch 30 | Tr Loss: 0.0844 | Tr Acc: 0.9676 | Val Acc: 0.6967 | Best Val: 0.7872\n",
+      "Epoch 40 | Tr Loss: 0.0732 | Tr Acc: 0.9732 | Val Acc: 0.7093 | Best Val: 0.7872\n",
+      "Epoch 50 | Tr Loss: 0.0706 | Tr Acc: 0.9726 | Val Acc: 0.7070 | Best Val: 0.7872\n",
+      "Epoch 60 | Tr Loss: 0.0670 | Tr Acc: 0.9743 | Val Acc: 0.7030 | Best Val: 0.7872\n",
+      "Epoch 70 | Tr Loss: 0.0694 | Tr Acc: 0.9741 | Val Acc: 0.7073 | Best Val: 0.7872\n",
+      "Epoch 80 | Tr Loss: 0.0669 | Tr Acc: 0.9736 | Val Acc: 0.7045 | Best Val: 0.7872\n",
+      "Epoch 90 | Tr Loss: 0.0649 | Tr Acc: 0.9759 | Val Acc: 0.6999 | Best Val: 0.7872\n",
+      "Epoch 99 | Tr Loss: 0.0635 | Tr Acc: 0.9755 | Val Acc: 0.6985 | Best Val: 0.7872\n",
+      "\n",
+      "===== Đang xử lý Fold 4 =====\n",
+      "Train Bệnh nhân: AD=29, NC=23\n",
+      "Epoch 00 | Tr Loss: 0.4857 | Tr Acc: 0.7585 | Val Acc: 0.6291 | Best Val: 0.6291\n",
+      "Epoch 10 | Tr Loss: 0.1564 | Tr Acc: 0.9377 | Val Acc: 0.7943 | Best Val: 0.8686\n",
+      "Epoch 20 | Tr Loss: 0.1129 | Tr Acc: 0.9524 | Val Acc: 0.8068 | Best Val: 0.8686\n",
+      "Epoch 30 | Tr Loss: 0.0902 | Tr Acc: 0.9647 | Val Acc: 0.7975 | Best Val: 0.8686\n",
+      "Epoch 40 | Tr Loss: 0.0826 | Tr Acc: 0.9677 | Val Acc: 0.7888 | Best Val: 0.8686\n",
+      "Epoch 50 | Tr Loss: 0.0779 | Tr Acc: 0.9701 | Val Acc: 0.7912 | Best Val: 0.8686\n",
+      "Epoch 60 | Tr Loss: 0.0678 | Tr Acc: 0.9737 | Val Acc: 0.7896 | Best Val: 0.8686\n",
+      "Epoch 70 | Tr Loss: 0.0735 | Tr Acc: 0.9705 | Val Acc: 0.7848 | Best Val: 0.8686\n",
+      "Epoch 80 | Tr Loss: 0.0727 | Tr Acc: 0.9718 | Val Acc: 0.7814 | Best Val: 0.8686\n",
+      "Epoch 90 | Tr Loss: 0.0682 | Tr Acc: 0.9736 | Val Acc: 0.7750 | Best Val: 0.8686\n",
+      "Epoch 99 | Tr Loss: 0.0691 | Tr Acc: 0.9738 | Val Acc: 0.7795 | Best Val: 0.8686\n",
+      "\n",
+      "===== Đang xử lý Fold 5 =====\n",
+      "Train Bệnh nhân: AD=29, NC=23\n",
+      "Epoch 00 | Tr Loss: 0.4251 | Tr Acc: 0.8071 | Val Acc: 0.5332 | Best Val: 0.5332\n",
+      "Epoch 10 | Tr Loss: 0.1448 | Tr Acc: 0.9420 | Val Acc: 0.6146 | Best Val: 0.6733\n",
+      "Epoch 20 | Tr Loss: 0.1038 | Tr Acc: 0.9604 | Val Acc: 0.6294 | Best Val: 0.6733\n",
+      "Epoch 30 | Tr Loss: 0.0868 | Tr Acc: 0.9662 | Val Acc: 0.6339 | Best Val: 0.6733\n",
+      "Epoch 40 | Tr Loss: 0.0760 | Tr Acc: 0.9715 | Val Acc: 0.6326 | Best Val: 0.6733\n",
+      "Epoch 50 | Tr Loss: 0.0672 | Tr Acc: 0.9738 | Val Acc: 0.6434 | Best Val: 0.6733\n",
+      "Epoch 60 | Tr Loss: 0.0627 | Tr Acc: 0.9769 | Val Acc: 0.6318 | Best Val: 0.6733\n",
+      "Epoch 70 | Tr Loss: 0.0593 | Tr Acc: 0.9783 | Val Acc: 0.6442 | Best Val: 0.6733\n",
+      "Epoch 80 | Tr Loss: 0.0577 | Tr Acc: 0.9771 | Val Acc: 0.6408 | Best Val: 0.6733\n",
+      "Epoch 90 | Tr Loss: 0.0564 | Tr Acc: 0.9782 | Val Acc: 0.6423 | Best Val: 0.6733\n",
+      "Epoch 99 | Tr Loss: 0.0607 | Tr Acc: 0.9773 | Val Acc: 0.6402 | Best Val: 0.6733\n",
+      "\n",
+      "===== Đang xử lý Fold 6 =====\n",
+      "Train Bệnh nhân: AD=29, NC=23\n",
+      "Epoch 00 | Tr Loss: 0.4482 | Tr Acc: 0.7910 | Val Acc: 0.6291 | Best Val: 0.6291\n",
+      "Epoch 10 | Tr Loss: 0.1584 | Tr Acc: 0.9344 | Val Acc: 0.7092 | Best Val: 0.7505\n",
+      "Epoch 20 | Tr Loss: 0.1334 | Tr Acc: 0.9478 | Val Acc: 0.7283 | Best Val: 0.7806\n",
+      "Epoch 30 | Tr Loss: 0.1191 | Tr Acc: 0.9518 | Val Acc: 0.8039 | Best Val: 0.8266\n",
+      "Epoch 40 | Tr Loss: 0.0941 | Tr Acc: 0.9646 | Val Acc: 0.7737 | Best Val: 0.8266\n",
+      "Epoch 50 | Tr Loss: 0.0775 | Tr Acc: 0.9691 | Val Acc: 0.7380 | Best Val: 0.8266\n",
+      "Epoch 60 | Tr Loss: 0.0707 | Tr Acc: 0.9732 | Val Acc: 0.7568 | Best Val: 0.8266\n",
+      "Epoch 70 | Tr Loss: 0.0671 | Tr Acc: 0.9738 | Val Acc: 0.7555 | Best Val: 0.8266\n",
+      "Epoch 80 | Tr Loss: 0.0658 | Tr Acc: 0.9738 | Val Acc: 0.7550 | Best Val: 0.8266\n",
+      "Epoch 90 | Tr Loss: 0.0625 | Tr Acc: 0.9760 | Val Acc: 0.7595 | Best Val: 0.8266\n",
+      "Epoch 99 | Tr Loss: 0.0622 | Tr Acc: 0.9774 | Val Acc: 0.7655 | Best Val: 0.8266\n",
+      "\n",
+      ">>> TRUNG BÌNH K-FOLD ACCURACY (Tổ hợp ['Fp1', 'Fp2', 'F7', 'F3', 'Fz', 'F4', 'F8', 'T3', 'C3', 'Cz', 'C4', 'T4', 'T5', 'P3', 'Pz', 'P4', 'T6', 'O1', 'O2']): 0.8193\n"
+     ]
+    }
+   ],
+   "source": [
+    "import torch\n",
+    "import torch.nn as nn\n",
+    "import torch.nn.functional as F\n",
+    "import os\n",
+    "import pandas as pd\n",
+    "import numpy as np\n",
+    "import random\n",
+    "from sklearn.preprocessing import StandardScaler\n",
+    "from sklearn.metrics import f1_score, accuracy_score, recall_score, confusion_matrix\n",
+    "import sys\n",
+    "from collections import defaultdict\n",
+    "import csv\n",
+    "import gc\n",
+    "from torch_geometric.nn import GATv2Conv, BatchNorm\n",
+    "from torch_geometric.nn import global_mean_pool, global_max_pool\n",
+    "from torch_geometric.nn.norm import GraphNorm\n",
+    "from torch_geometric.data import Data\n",
+    "from torch_geometric.loader import DataLoader\n",
+    "from torch_geometric.nn import summary\n",
+    "\n",
+    "# =====================================================================\n",
+    "# CẤU HÌNH HỆ THỐNG\n",
+    "# =====================================================================\n",
+    "USE_MAJORITY_VOTING = False  # Đổi thành True để dùng Voting cấp độ bệnh nhân\n",
+    "NUM_FEATURES = 8             # Số đặc trưng mỗi nút (5 PSD + 3 Hjorth)\n",
+    "\n",
+    "ALL_19_CHANNELS = [\n",
+    "    'Fp1', 'Fp2', 'F7', 'F3', 'Fz', 'F4', 'F8', \n",
+    "    'T3', 'C3', 'Cz', 'C4', 'T4', 'T5', 'P3', \n",
+    "    'Pz', 'P4', 'T6', 'O1', 'O2'\n",
+    "]\n",
+    "\n",
+    "def seed_everything(seed=42):\n",
+    "    random.seed(seed)\n",
+    "    np.random.seed(seed)\n",
+    "    torch.manual_seed(seed)\n",
+    "\n",
+    "# =====================================================================\n",
+    "# KIẾN TRÚC AI SOTA: DYNAMIC GRAPH TRANSFORMER (DÀNH CHO 3 KÊNH)\n",
+    "# =====================================================================\n",
+    "class DynamicGraphTransformer(nn.Module):\n",
+    "    def __init__(self, num_nodes=19, in_features=NUM_FEATURES, num_classes=2):\n",
+    "        super(DynamicGraphTransformer, self).__init__()\n",
+    "        \n",
+    "        # ==========================================\n",
+    "        # BLOCK 1: GRAPH LEARNING SÂU (Tự động trích xuất không gian)\n",
+    "        # ==========================================\n",
+    "        # Lớp GAT 1: 8 chiều -> 32 chiều x 4 Heads = 128 chiều\n",
+    "        self.gat1 = GATv2Conv(in_features, 32, heads=4, concat=True, edge_dim=1)\n",
+    "        self.norm1 = GraphNorm(128)\n",
+    "        \n",
+    "        # Lớp GAT 2: 128 chiều -> 64 chiều x 2 Heads = 128 chiều\n",
+    "        self.gat2 = GATv2Conv(128, 64, heads=2, concat=True, edge_dim=1)\n",
+    "        self.norm2 = GraphNorm(128)\n",
+    "        \n",
+    "        # ==========================================\n",
+    "        # BLOCK 2: BỘ PHÂN LOẠI MLP HẠNG NẶNG (~40k Tham số)\n",
+    "        # ==========================================\n",
+    "        # Đầu vào của MLP sẽ là 256 chiều (128 Mean + 128 Max)\n",
+    "        self.fc1 = nn.Linear(256, 128)\n",
+    "        self.fc2 = nn.Linear(128, 64)\n",
+    "        self.fc3 = nn.Linear(64, num_classes)\n",
+    "        \n",
+    "        # Tăng mạnh Dropout để ép mô hình cỡ trung này không được học vẹt\n",
+    "        self.dropout = nn.Dropout(p=0.5)\n",
+    "\n",
+    "    def forward(self, data):\n",
+    "        # Lấy thêm biến 'batch' để phục vụ Pooling\n",
+    "        x, edge_index, edge_attr, batch = data.x, data.edge_index, data.edge_attr, data.batch\n",
+    "\n",
+    "        # --- LỚP GRAPH 1 ---\n",
+    "        x = self.gat1(x, edge_index, edge_attr)\n",
+    "        x = self.norm1(x)\n",
+    "        x = F.gelu(x)\n",
+    "        x = self.dropout(x)\n",
+    "        \n",
+    "        # --- LỚP GRAPH 2 ---\n",
+    "        x = self.gat2(x, edge_index, edge_attr)\n",
+    "        x = self.norm2(x)\n",
+    "        x = F.gelu(x)\n",
+    "        x = self.dropout(x)\n",
+    "        \n",
+    "        # --- MULTI-POOLING (Sức mạnh nằm ở đây) ---\n",
+    "        # Gom đặc trưng của 19 kênh lại nhưng bảo toàn các tín hiệu đột biến\n",
+    "        x_mean = global_mean_pool(x, batch)  # Bắt sóng nền (Background EEG)\n",
+    "        x_max = global_max_pool(x, batch)    # Bắt các gai bất thường (Spikes)\n",
+    "        x_pooled = torch.cat([x_mean, x_max], dim=1) # Kích thước: [Batch_size, 256]\n",
+    "\n",
+    "        # --- LỚP MLP SÂU ---\n",
+    "        x = self.fc1(x_pooled)\n",
+    "        x = F.gelu(x)\n",
+    "        x = self.dropout(x)\n",
+    "        \n",
+    "        x = self.fc2(x)\n",
+    "        x = F.gelu(x)\n",
+    "        x = self.dropout(x)\n",
+    "        \n",
+    "        logits = self.fc3(x)\n",
+    "\n",
+    "        return logits\n",
+    "\n",
+    "# =====================================================================\n",
+    "# HÀM XỬ LÝ DỮ LIỆU & BATCHING\n",
+    "# =====================================================================\n",
+    "def load_raw_data_dict():\n",
+    "    BASE_DIR_01 = '/kaggle/input/notebooks/dtandat/mf-mgcn-processing'\n",
+    "    PROCESSED_DIR = os.path.join(BASE_DIR_01, \"processed_data\")\n",
+    "    BASE_DIR_02 = '/kaggle/input/datasets/dtandat/mf-mgcn-datasets/ds004504'\n",
+    "    tsv_path = os.path.join(BASE_DIR_02, \"participants.tsv\")\n",
+    "\n",
+    "    try:\n",
+    "        df = pd.read_csv(tsv_path, sep=r'\\t')\n",
+    "    except:\n",
+    "        df = pd.read_csv(tsv_path, sep=r'\\s+')\n",
+    "    \n",
+    "    sub_label_map = {}\n",
+    "    for _, row in df.iterrows():\n",
+    "        sub = row['participant_id']\n",
+    "        grp = str(row['Group']).strip()\n",
+    "        if grp == 'A': sub_label_map[sub] = 'AD'\n",
+    "        elif grp == 'C': sub_label_map[sub] = 'NC'\n",
+    "    \n",
+    "    raw_data_dict = {'AD':[], 'NC':[]}\n",
+    "    files = sorted([f for f in os.listdir(PROCESSED_DIR) if f.endswith('_features.npy')])\n",
+    "    \n",
+    "    print(f\">>> Đang tải dữ liệu từ {len(files)} subjects...\")\n",
+    "    for f in files:\n",
+    "        sub_id = f.split('_')[0]\n",
+    "        if sub_id not in sub_label_map: continue\n",
+    "        \n",
+    "        features_raw = np.load(os.path.join(PROCESSED_DIR, f))\n",
+    "        features_raw = np.nan_to_num(features_raw, nan=0.0)\n",
+    "        raw_data_dict[sub_label_map[sub_id]].append({\n",
+    "            'features': features_raw,\n",
+    "            'id': sub_id\n",
+    "        })\n",
+    "    \n",
+    "    return raw_data_dict\n",
+    "\n",
+    "def create_dataloaders(raw_data_dict, combo_indices, train_indices, val_indices, batch_size=32):\n",
+    "    scaler = StandardScaler()\n",
+    "    ad_list, nc_list = raw_data_dict['AD'], raw_data_dict['NC']\n",
+    "    ad_ids = {item['id'] for item in ad_list}\n",
+    "    \n",
+    "    def get_subs(indices, source_list):\n",
+    "        return [source_list[i] for i in indices if i < len(source_list)]\n",
+    "    \n",
+    "    train_subs = get_subs(train_indices['AD'], ad_list) + get_subs(train_indices['NC'], nc_list)\n",
+    "    val_subs = get_subs(val_indices['AD'], ad_list) + get_subs(val_indices['NC'], nc_list)\n",
+    "\n",
+    "    if not train_subs: return None, None, 0, 0\n",
+    "\n",
+    "    # [SỬA LỖI TẠI ĐÂY] Gom toàn bộ dữ liệu Train và duỗi thành 2D\n",
+    "    all_train_data = np.vstack([sub['features'] for sub in train_subs])\n",
+    "    # all_train_data đang có shape: (Tổng số đoạn, 19, 8) -> Ép về: (Tổng số đoạn * 19, 8)\n",
+    "    all_train_data_2d = all_train_data.reshape(-1, NUM_FEATURES)\n",
+    "    scaler.fit(all_train_data_2d)\n",
+    "\n",
+    "    # Khởi tạo đồ thị 3 Nút (9 Cạnh Fully Connected) cho GATv2\n",
+    "    edges = [[i, j] for i in range(3) for j in range(3)]\n",
+    "    edge_index = torch.tensor(edges, dtype=torch.long).t().contiguous()\n",
+    "    edge_attr = torch.ones((9, 1), dtype=torch.float32)\n",
+    "\n",
+    "    def convert_to_pyg(sub_list):\n",
+    "        data_list = []\n",
+    "        cnt_0, cnt_1 = 0, 0\n",
+    "        \n",
+    "        for sub in sub_list:\n",
+    "            sub_feats = sub['features']\n",
+    "            n_segs = sub_feats.shape[0]\n",
+    "            \n",
+    "            # [SỬA LỖI TẠI ĐÂY] Duỗi thành 2D để transform, sau đó gấp lại thành 3D\n",
+    "            sub_feats_2d = sub_feats.reshape(-1, NUM_FEATURES)\n",
+    "            feats_scaled_2d = np.nan_to_num(scaler.transform(sub_feats_2d))\n",
+    "            \n",
+    "            # Khôi phục shape gốc (Epochs, 19 Kênh, 8 Đặc trưng)\n",
+    "            features_3d = feats_scaled_2d.reshape(n_segs, 19, NUM_FEATURES)\n",
+    "            \n",
+    "            # [SLICE] Cắt lấy đúng 3 kênh đang xét (Sức mạnh của vét cạn nằm ở đây)\n",
+    "            features_3d_subset = features_3d[:, combo_indices, :]\n",
+    "            \n",
+    "            y_label = 0 if sub['id'] in ad_ids else 1\n",
+    "            if y_label == 0: cnt_0 += 1\n",
+    "            else: cnt_1 += 1\n",
+    "\n",
+    "            for i in range(n_segs):\n",
+    "                x = torch.tensor(features_3d_subset[i], dtype=torch.float32)\n",
+    "                y = torch.tensor([y_label], dtype=torch.long)\n",
+    "                data = Data(x=x, y=y, edge_index=edge_index, edge_attr=edge_attr, sub_id=sub['id'])\n",
+    "                data_list.append(data)\n",
+    "                \n",
+    "        return data_list, cnt_0, cnt_1\n",
+    "    \n",
+    "    train_data, t_cnt_0, t_cnt_1 = convert_to_pyg(train_subs)\n",
+    "    val_data, _, _ = convert_to_pyg(val_subs)\n",
+    "    \n",
+    "    print(f\"Train Bệnh nhân: AD={t_cnt_0}, NC={t_cnt_1}\")\n",
+    "\n",
+    "    train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True)\n",
+    "    val_loader = DataLoader(val_data, batch_size=batch_size, shuffle=False)\n",
+    "    \n",
+    "    return train_loader, val_loader, t_cnt_0, t_cnt_1\n",
+    "\n",
+    "# =====================================================================\n",
+    "# VÒNG LẶP HUẤN LUYỆN & ĐÁNH GIÁ\n",
+    "# =====================================================================\n",
+    "def train_epoch(model, loader, criterion, optimizer, device):\n",
+    "    model.train()\n",
+    "    total_loss, total_correct, total_samples = 0, 0, 0\n",
+    "    \n",
+    "    for data in loader:\n",
+    "        data = data.to(device)\n",
+    "        optimizer.zero_grad()\n",
+    "        out = model(data)\n",
+    "        loss = criterion(out, data.y)\n",
+    "        loss.backward()\n",
+    "        optimizer.step()\n",
+    "\n",
+    "        total_loss += loss.item() * data.num_graphs\n",
+    "        total_correct += (out.argmax(dim=1) == data.y).sum().item()\n",
+    "        total_samples += data.num_graphs\n",
+    "\n",
+    "    return total_loss / total_samples, total_correct / total_samples\n",
+    "\n",
+    "def evaluate(model, loader, criterion, device):\n",
+    "    model.eval()\n",
+    "    \n",
+    "    if USE_MAJORITY_VOTING:\n",
+    "        # CHẤM ĐIỂM THEO MAJORITY VOTING (SUBJECT-LEVEL)\n",
+    "        patient_preds = defaultdict(list)\n",
+    "        patient_trues = defaultdict(int)\n",
+    "        total_samples, total_loss = 0, 0\n",
+    "\n",
+    "        with torch.no_grad():\n",
+    "            for data in loader:\n",
+    "                data = data.to(device)\n",
+    "                out = model(data)\n",
+    "                loss = criterion(out, data.y)\n",
+    "                preds = out.argmax(dim=1).cpu().tolist()\n",
+    "                trues = data.y.cpu().tolist()\n",
+    "                sub_ids = data.sub_id\n",
+    "                \n",
+    "                total_loss += loss.item() * data.num_graphs\n",
+    "                total_samples += data.num_graphs\n",
+    "                \n",
+    "                for i in range(len(sub_ids)):\n",
+    "                    sub_id = sub_ids[i]\n",
+    "                    patient_preds[sub_id].append(preds[i])\n",
+    "                    patient_trues[sub_id] = trues[i]\n",
+    "        \n",
+    "        final_preds, final_trues = [], []\n",
+    "        for sub_id, preds_list in patient_preds.items():\n",
+    "            count_0 = preds_list.count(0)\n",
+    "            count_1 = preds_list.count(1)\n",
+    "            final_vote = 1 if count_1 > count_0 else 0\n",
+    "            final_preds.append(final_vote)\n",
+    "            final_trues.append(patient_trues[sub_id])\n",
+    "\n",
+    "        loss = total_loss / total_samples\n",
+    "        acc = accuracy_score(final_trues, final_preds)\n",
+    "        f1 = f1_score(final_trues, final_preds, average='macro', zero_division=0)\n",
+    "        recall = recall_score(final_trues, final_preds, average='macro', zero_division=0)\n",
+    "        \n",
+    "    else:\n",
+    "        # CHẤM ĐIỂM THEO ĐOẠN (SEGMENT-LEVEL)\n",
+    "        total_correct, total_samples, total_loss = 0, 0, 0\n",
+    "        all_targets, all_preds = [], []\n",
+    "        \n",
+    "        with torch.no_grad():\n",
+    "            for data in loader:\n",
+    "                data = data.to(device)\n",
+    "                out = model(data)\n",
+    "                loss = criterion(out, data.y)\n",
+    "                pred = out.argmax(dim=1)\n",
+    "                \n",
+    "                total_loss += loss.item() * data.num_graphs\n",
+    "                total_correct += (pred == data.y).sum().item()\n",
+    "                total_samples += data.num_graphs\n",
+    "                \n",
+    "                all_targets.extend(data.y.cpu().tolist())\n",
+    "                all_preds.extend(pred.cpu().tolist())\n",
+    "            \n",
+    "        acc = total_correct / total_samples\n",
+    "        loss = total_loss / total_samples\n",
+    "        f1 = f1_score(all_targets, all_preds, average='macro', zero_division=0)\n",
+    "        recall = recall_score(all_targets, all_preds, average='macro', zero_division=0)\n",
+    "\n",
+    "    return acc, f1, recall, loss\n",
+    "\n",
+    "def main():\n",
+    "    # Nhận 3 kênh từ Terminal (VD: python train.py Fp1 F8 Pz)\n",
+    "    # INPUT_CHANNELS = sys.argv[1:]\n",
+    "    INPUT_CHANNELS = [\n",
+    "    'Fp1', 'Fp2', 'F7', 'F3', 'Fz', 'F4', 'F8', \n",
+    "    'T3', 'C3', 'Cz', 'C4', 'T4', 'T5', 'P3', \n",
+    "    'Pz', 'P4', 'T6', 'O1', 'O2'\n",
+    "    ]\n",
+    "    if len(INPUT_CHANNELS) != 19:\n",
+    "        print(\"Vui lòng truyền đúng 3 kênh. VD: python train.py Fp1 F8 Pz\")\n",
+    "        sys.exit(1)\n",
+    "        \n",
+    "    # Ánh xạ tên kênh thành Index (0-18)\n",
+    "    combo_indices = [ALL_19_CHANNELS.index(ch) for ch in INPUT_CHANNELS]\n",
+    "    print(f\"Đang kiểm thử Tổ hợp: {INPUT_CHANNELS} (Indices: {combo_indices})\")\n",
+    "\n",
+    "    seed_everything(42)\n",
+    "    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')\n",
+    "    print(f\"Sử dụng thiết bị: {device}\")\n",
+    "\n",
+    "    raw_data_dict = load_raw_data_dict()\n",
+    "\n",
+    "    folds_indices = [        \n",
+    "        ([21, 2, 24, 11, 19, 30, 14, 35, 27, 0, 3, 10, 6, 12, 31, 4, 32, 25, 33, 13, 7, 28, 26], [15, 22, 20, 34, 16, 29], [17, 25, 19, 0, 3, 16, 10, 6, 12, 2, 4, 22, 13, 7, 9, 18, 28, 8, 1, 5, 23, 14, 26], [11, 21, 27, 15, 20, 24]),\n",
+    "        ([18, 35, 32, 11, 2, 7, 5, 4, 22, 25, 13, 14, 6, 21, 26, 29, 9, 19, 1, 23, 12, 17, 20, 24, 15, 10, 31, 30, 0], [34, 16, 3, 28, 27, 33, 8], [8, 13, 5, 4, 21, 23, 16, 28, 14, 6, 22, 18, 9, 19, 1, 12, 17, 20, 24, 15, 10, 0, 7], [11, 3, 27, 26, 25, 2]),\n",
+    "        ([0, 1, 3, 4, 5, 7, 8, 9, 11, 12, 13, 14, 16, 17, 18, 19, 20, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 33, 35], [2, 6, 10, 15, 21, 32, 34], [0, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 14, 17, 18, 19, 21, 22, 23, 24, 25, 26, 28], [1, 10, 15, 16, 20, 27]),\n",
+    "        ([1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 14, 15, 18, 19, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 34, 35], [0, 7, 13, 16, 17, 20, 33], [0, 1, 3, 4, 5, 6, 7, 8, 10, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 26, 27, 28], [2, 9, 11, 24, 25]),\n",
+    "        ([1, 2, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 34, 35], [0, 3, 4, 6, 16, 22, 33], [0, 1, 3, 4, 5, 6, 8, 10, 11, 12, 14, 15, 16, 17, 18, 19, 21, 22, 23, 24, 25, 26, 28], [2, 7, 9, 13, 20, 27]),\n",
+    "        ([15, 22, 17, 20, 34, 16, 29, 35, 27, 0, 3, 10, 6, 12, 31, 4, 32, 25, 33, 13, 7, 28, 26, 9, 18, 8, 23, 1, 5], [21, 2, 24, 11, 19, 30, 14], [11, 21, 27, 15, 20, 24, 10, 6, 12, 2, 4, 22, 13, 7, 9, 18, 28, 8, 1, 5, 23, 14, 26], [17, 25, 19, 0, 3, 16]),\n",
+    "        ([15, 22, 17, 20, 34, 16, 29, 21, 2, 24, 11, 19, 30, 14, 31, 4, 32, 25, 33, 13, 7, 28, 26, 9, 18, 8, 23, 1, 5], [35, 27, 0, 3, 10, 6, 12], [11, 21, 27, 15, 20, 24, 17, 25, 19, 0, 3, 16, 13, 7, 9, 18, 28, 8, 1, 5, 23, 14, 26], [10, 6, 12, 2, 4, 22])\n",
+    "    ]\n",
+    "\n",
+    "    print(f\"===== Bắt đầu Training (Chế độ Voting: {'BẬT' if USE_MAJORITY_VOTING else 'TẮT'}) =====\")\n",
+    "    best_vals = []\n",
+    "    \n",
+    "    for fold_idx, (tr_ad, val_ad, tr_nc, val_nc) in enumerate(folds_indices):\n",
+    "        print(f\"\\n===== Đang xử lý Fold {fold_idx} =====\")\n",
+    "        \n",
+    "        train_loader, val_loader, t_cnt_0, t_cnt_1 = create_dataloaders(\n",
+    "            raw_data_dict, combo_indices,\n",
+    "            {'AD': tr_ad, 'NC': tr_nc},\n",
+    "            {'AD': val_ad, 'NC': val_nc}\n",
+    "        )\n",
+    "\n",
+    "        model = DynamicGraphTransformer().to(device)\n",
+    "        \n",
+    "        # In tóm tắt mô hình ở Fold 0\n",
+    "        if fold_idx == 0:\n",
+    "            dummy_data = next(iter(train_loader)).to(device)\n",
+    "            try: print(summary(model, dummy_data))\n",
+    "            except Exception as e: pass\n",
+    "\n",
+    "        optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-3)\n",
+    "        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=10)\n",
+    "        \n",
+    "        # Tự động tính trọng số cân bằng lớp (Class Imbalance Weights)\n",
+    "        weights = torch.tensor([1.0 / t_cnt_0, 1.0 / t_cnt_1], dtype=torch.float32).to(device)\n",
+    "        weights = weights / weights.sum() \n",
+    "        criterion = nn.CrossEntropyLoss(weight=weights)\n",
+    "\n",
+    "        best_acc = 0.0\n",
+    "        for epoch in range(100):\n",
+    "            t_loss, t_acc = train_epoch(model, train_loader, criterion, optimizer, device)\n",
+    "            v_acc, v_f1, v_recall, v_loss = evaluate(model, val_loader, criterion, device)\n",
+    "            scheduler.step(v_acc)\n",
+    "            \n",
+    "            if v_acc > best_acc: best_acc = v_acc\n",
+    "            \n",
+    "            if epoch % 10 == 0 or epoch == 99:\n",
+    "                lr = optimizer.param_groups[0]['lr']\n",
+    "                print(f\"Epoch {epoch:02d} | Tr Loss: {t_loss:.4f} | Tr Acc: {t_acc:.4f} | Val Acc: {v_acc:.4f} | Best Val: {best_acc:.4f}\")\n",
+    "\n",
+    "        best_vals.append(best_acc)\n",
+    "        del train_loader, val_loader, model, optimizer, scheduler\n",
+    "        gc.collect() # Ép Python dọn rác ngay lập tức\n",
+    "        if torch.cuda.is_available():\n",
+    "            torch.cuda.empty_cache() # Dọn rác VRAM của Card màn hình\n",
+    "    \n",
+    "    print(f\"\\n>>> TRUNG BÌNH K-FOLD ACCURACY (Tổ hợp {INPUT_CHANNELS}): {sum(best_vals) / len(best_vals):.4f}\")\n",
+    "\n",
+    "if __name__ == '__main__':\n",
+    "    main()"
+   ]
+  }
+ ],
+ "metadata": {
+  "kaggle": {
+   "accelerator": "nvidiaTeslaT4",
+   "dataSources": [
+    {
+     "databundleVersionId": 16542997,
+     "datasetId": 9989031,
+     "sourceId": 15609361,
+     "sourceType": "datasetVersion"
+    },
+    {
+     "sourceId": 310110736,
+     "sourceType": "kernelVersion"
+    }
+   ],
+   "dockerImageVersionId": 31328,
+   "isGpuEnabled": true,
+   "isInternetEnabled": true,
+   "language": "python",
+   "sourceType": "notebook"
+  },
+  "kernelspec": {
+   "display_name": "Python 3",
+   "language": "python",
+   "name": "python3"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.12.12"
+  },
+  "papermill": {
+   "default_parameters": {},
+   "duration": 3893.200488,
+   "end_time": "2026-04-09T06:26:59.704262+00:00",
+   "environment_variables": {},
+   "exception": null,
+   "input_path": "__notebook__.ipynb",
+   "output_path": "__notebook__.ipynb",
+   "parameters": {},
+   "start_time": "2026-04-09T05:22:06.503774+00:00",
+   "version": "2.7.0"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 5
+}

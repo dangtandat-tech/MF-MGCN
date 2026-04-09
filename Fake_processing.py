@@ -1,371 +1,428 @@
-import os
-import glob
-import numpy as np
-import pandas as pd
-import mne
-import warnings
-import matplotlib.pyplot as plt
-import seaborn as sns
-from sklearn.preprocessing import StandardScaler
-import sys
-
-# Tắt cảnh báo MNE không cần thiết để output gọn gàng
-warnings.filterwarnings("ignore")
-mne.set_log_level('ERROR')
-
-# ==============================================================================
-# 1. CẤU HÌNH THAM SỐ (THEO ĐÚNG BÀI BÁO)
-# ==============================================================================
-
-# [cite_start]Các băng tần (Frequency Bands) [cite: 252]
-BANDS = {
-    'Delta': (0.5, 4),
-    'Theta': (4, 8),
-    'Alpha': (8, 13),
-    'Beta': (13, 25),
-    'Gamma': (25, 45)
+{
+ "cells": [
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "id": "e7b02b55",
+   "metadata": {
+    "_cell_guid": "09bf3064-67db-43dd-addf-238d6c16f6a2",
+    "_uuid": "3ae59b2e-c53c-45a2-8526-ae3355473bc3",
+    "collapsed": false,
+    "execution": {
+     "iopub.execute_input": "2026-04-09T03:22:27.476875Z",
+     "iopub.status.busy": "2026-04-09T03:22:27.475390Z",
+     "iopub.status.idle": "2026-04-09T03:35:47.461008Z",
+     "shell.execute_reply": "2026-04-09T03:35:47.459941Z"
+    },
+    "jupyter": {
+     "outputs_hidden": false
+    },
+    "papermill": {
+     "duration": 799.992763,
+     "end_time": "2026-04-09T03:35:47.463609+00:00",
+     "exception": false,
+     "start_time": "2026-04-09T03:22:27.470846+00:00",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      ">>> Initialized: Structural Adjacency Matrix (Prior Graph).\n",
+      ">>> Tìm thấy 88 subjects. Bắt đầu trích xuất Hybrid Features...\n",
+      "Finished sub-001: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-002: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-003: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-004: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-005: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-006: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-007: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-008: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-009: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-010: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-011: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-012: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-013: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-014: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-015: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-016: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-017: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-018: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-019: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-020: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-021: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-022: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-023: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-024: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-025: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-026: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-027: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-028: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-029: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-030: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-031: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-032: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-033: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-034: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-035: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-036: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-037: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-038: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-039: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-040: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-041: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-042: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-043: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-044: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-045: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-046: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-047: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-048: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-049: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-050: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-051: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-052: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-053: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-054: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-055: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-056: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-057: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-058: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-059: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-060: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-061: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-062: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-063: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-064: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-065: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-066: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-067: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-068: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-069: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-070: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-071: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-072: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-073: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-074: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-075: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-076: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-077: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-078: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-079: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-080: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-081: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-082: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-083: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-084: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-085: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-086: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-087: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "Finished sub-088: Epochs=291 | Tensor Shape=(291, 19, 8)\n",
+      "\n",
+      ">>> HOÀN TẤT: Đã xử lý 88/88 subjects.\n",
+      ">>> Tensor Dữ liệu (Epochs, 19, 8) lưu tại: /kaggle/working/processed_data\n"
+     ]
+    }
+   ],
+   "source": [
+    "import os\n",
+    "import glob\n",
+    "import numpy as np\n",
+    "import pandas as pd\n",
+    "import mne\n",
+    "import warnings\n",
+    "import matplotlib.pyplot as plt\n",
+    "import seaborn as sns\n",
+    "from sklearn.preprocessing import StandardScaler\n",
+    "from scipy.signal import welch\n",
+    "\n",
+    "# Tắt cảnh báo MNE\n",
+    "warnings.filterwarnings(\"ignore\")\n",
+    "mne.set_log_level('ERROR')\n",
+    "\n",
+    "# ==============================================================================\n",
+    "# 1. CẤU HÌNH THAM SỐ LÂM SÀNG\n",
+    "# ==============================================================================\n",
+    "\n",
+    "BANDS = {\n",
+    "    'Delta': (0.5, 4),\n",
+    "    'Theta': (4, 8),\n",
+    "    'Alpha': (8, 13),\n",
+    "    'Beta': (13, 25),\n",
+    "    'Gamma': (25, 45)\n",
+    "}\n",
+    "\n",
+    "# Thông số Cửa sổ trượt\n",
+    "WINDOW_SIZE = 10  # 10 giây\n",
+    "OVERLAP = 0.9     # Chồng lấp 90%\n",
+    "DURATION_LIMIT = 300  # Giới hạn 5 phút (300s)\n",
+    "\n",
+    "STANDARD_CHANNELS = [\n",
+    "    'Fp1', 'Fp2', 'F7', 'F3', 'Fz', 'F4', 'F8', \n",
+    "    'T3', 'C3', 'Cz', 'C4', 'T4', 'T5', 'P3', \n",
+    "    'Pz', 'P4', 'T6', 'O1', 'O2'\n",
+    "]\n",
+    "\n",
+    "BRAIN_REGIONS = {\n",
+    "    'Frontal': ['Fp1', 'Fp2', 'F7', 'F3', 'Fz', 'F4', 'F8'],\n",
+    "    'Central': ['C3', 'Cz', 'C4'],\n",
+    "    'Parietal': ['P3', 'Pz', 'P4'],\n",
+    "    'Temporal': ['T3', 'T4', 'T5', 'T6'],\n",
+    "    'Occipital': ['O1', 'O2']\n",
+    "}\n",
+    "\n",
+    "# ==============================================================================\n",
+    "# 2. HÀM TRÍCH XUẤT ĐẶC TRƯNG LAI ĐA MIỀN (HYBRID FEATURES)\n",
+    "# ==============================================================================\n",
+    "\n",
+    "def calculate_psd_features(signal_segment, sfreq):\n",
+    "    \"\"\"\n",
+    "    MIỀN TẦN SỐ: Tính Mật độ phổ công suất (PSD) cho 5 dải tần.\n",
+    "    Input: Đoạn tín hiệu (19 Kênh, 2500 Điểm)\n",
+    "    Output: Ma trận (19 Kênh, 5 Đặc trưng)\n",
+    "    \"\"\"\n",
+    "    n_channels = signal_segment.shape[0]\n",
+    "    psd_features = np.zeros((n_channels, 5))\n",
+    "    \n",
+    "    # nperseg = sfreq * 2 (Cửa sổ Welch 2 giây -> Độ phân giải tần số 0.5 Hz)\n",
+    "    for ch in range(n_channels):\n",
+    "        freqs, psd = welch(signal_segment[ch], fs=sfreq, nperseg=int(sfreq * 2))\n",
+    "        \n",
+    "        # SỬA LỖI NUMPY 2.0 TẠI ĐÂY: Dùng np.trapezoid thay cho np.trapz\n",
+    "        total_power = np.trapezoid(psd, freqs)\n",
+    "        if total_power == 0: total_power = 1e-9\n",
+    "            \n",
+    "        for i, (band, (f_min, f_max)) in enumerate(BANDS.items()):\n",
+    "            idx = np.logical_and(freqs >= f_min, freqs < f_max)\n",
+    "            # SỬA LỖI NUMPY 2.0 TẠI ĐÂY: Dùng np.trapezoid\n",
+    "            band_power = np.trapezoid(psd[idx], freqs[idx])\n",
+    "            psd_features[ch, i] = band_power / total_power\n",
+    "            \n",
+    "    return psd_features\n",
+    "\n",
+    "def calculate_hjorth_parameters(signal_segment):\n",
+    "    \"\"\"\n",
+    "    MIỀN THỜI GIAN: Tính 3 thông số Hjorth bằng Vector hóa siêu tốc.\n",
+    "    Input: Đoạn tín hiệu (19 Kênh, 2500 Điểm)\n",
+    "    Output: Ma trận (19 Kênh, 3 Đặc trưng)\n",
+    "    \"\"\"\n",
+    "    eps = 1e-10\n",
+    "    \n",
+    "    # Tính đạo hàm bậc 1 và 2 dọc theo trục thời gian\n",
+    "    dx = np.diff(signal_segment, axis=1)\n",
+    "    ddx = np.diff(dx, axis=1)\n",
+    "    \n",
+    "    # 1. Activity (Phương sai)\n",
+    "    activity = np.var(signal_segment, axis=1)\n",
+    "    \n",
+    "    # 2. Mobility (Sự linh hoạt)\n",
+    "    var_dx = np.var(dx, axis=1)\n",
+    "    mobility = np.sqrt(var_dx / (activity + eps))\n",
+    "    \n",
+    "    # 3. Complexity (Độ phức tạp)\n",
+    "    var_ddx = np.var(ddx, axis=1)\n",
+    "    mobility_dx = np.sqrt(var_ddx / (var_dx + eps))\n",
+    "    complexity = mobility_dx / (mobility + eps)\n",
+    "    \n",
+    "    return np.column_stack((activity, mobility, complexity))\n",
+    "\n",
+    "def create_structural_adjacency():\n",
+    "    \"\"\" Tạo ma trận kề Vật lý (Prior Spatial Graph) \"\"\"\n",
+    "    n_nodes = len(STANDARD_CHANNELS)\n",
+    "    adj = np.zeros((n_nodes, n_nodes))\n",
+    "    \n",
+    "    chan_to_region = {}\n",
+    "    for region, chans in BRAIN_REGIONS.items():\n",
+    "        for ch in chans: chan_to_region[ch] = region\n",
+    "            \n",
+    "    for i, ch1 in enumerate(STANDARD_CHANNELS):\n",
+    "        for j, ch2 in enumerate(STANDARD_CHANNELS):\n",
+    "            region1 = chan_to_region.get(ch1)\n",
+    "            region2 = chan_to_region.get(ch2)\n",
+    "            if region1 and region2 and region1 == region2:\n",
+    "                adj[i, j] = 1\n",
+    "    return adj\n",
+    "\n",
+    "# ==============================================================================\n",
+    "# 3. QUY TRÌNH XỬ LÝ (SUBJECT PROCESSING)\n",
+    "# ==============================================================================\n",
+    "\n",
+    "def process_one_subject(file_path, save_dir, sub_id):\n",
+    "    try:\n",
+    "        # --- BƯỚC 1: ĐỌC VÀ TIỀN XỬ LÝ ---\n",
+    "        raw = mne.io.read_raw_eeglab(file_path, preload=True, verbose=False)\n",
+    "        available_chans = raw.info['ch_names']\n",
+    "        picks = [ch for ch in STANDARD_CHANNELS if ch in available_chans]\n",
+    "        \n",
+    "        if len(picks) < len(STANDARD_CHANNELS):\n",
+    "            print(f\"BỎ QUA {sub_id}: Thiếu kênh (Tìm thấy {len(picks)}/19).\")\n",
+    "            return\n",
+    "\n",
+    "        raw.pick_channels(picks, ordered=True)\n",
+    "        raw.set_eeg_reference('average', projection=False)\n",
+    "        \n",
+    "        if raw.times[-1] > DURATION_LIMIT:\n",
+    "            raw.crop(tmin=0, tmax=DURATION_LIMIT)\n",
+    "\n",
+    "        # Xử lý NaN rác\n",
+    "        data = raw.get_data()\n",
+    "        if np.isnan(data).any():\n",
+    "            raw._data = np.nan_to_num(data, nan=0.0)\n",
+    "\n",
+    "        # Lọc Broadband (0.5 - 45 Hz) CHỈ 1 LẦN DUY NHẤT\n",
+    "        try:\n",
+    "            raw.filter(0.5, 45.0, method='iir', verbose=False)\n",
+    "        except:\n",
+    "            raw.filter(0.5, 45.0, verbose=False)\n",
+    "            \n",
+    "        filtered_data = raw.get_data()\n",
+    "\n",
+    "        # --- BƯỚC 2: CẮT CỬA SỔ VÀ TRÍCH XUẤT ĐẶC TRƯNG ---\n",
+    "        sfreq = raw.info['sfreq']\n",
+    "        window_samples = int(WINDOW_SIZE * sfreq)\n",
+    "        step_samples = int(window_samples * (1 - OVERLAP))\n",
+    "        total_samples = raw.n_times\n",
+    "        \n",
+    "        features_list = []\n",
+    "        \n",
+    "        # Sliding Window Loop\n",
+    "        for start in range(0, total_samples - window_samples + 1, step_samples):\n",
+    "            end = start + window_samples\n",
+    "            data_segment = filtered_data[:, start:end]\n",
+    "            \n",
+    "            # Clip nhiễu quá lớn (+/- 250uV) để bảo vệ Hjorth\n",
+    "            data_segment = np.clip(data_segment, -250e-6, 250e-6)\n",
+    "            \n",
+    "            # Khai thác song song 2 miền\n",
+    "            psd_feats = calculate_psd_features(data_segment, sfreq)\n",
+    "            hjorth_feats = calculate_hjorth_parameters(data_segment)\n",
+    "            \n",
+    "            # Ghép nối: 5 PSD + 3 Hjorth = 8 Đặc trưng\n",
+    "            # Kích thước segment_features: (19, 8)\n",
+    "            segment_features = np.concatenate((psd_feats, hjorth_feats), axis=1)\n",
+    "            features_list.append(segment_features)\n",
+    "\n",
+    "        if not features_list:\n",
+    "            print(f\"Cảnh báo: Không tạo được đoạn nào cho {sub_id}\")\n",
+    "            return\n",
+    "\n",
+    "        # Kích thước all_features: (n_segs, 19, 8)\n",
+    "        all_features = np.array(features_list)\n",
+    "        n_segs = all_features.shape[0]\n",
+    "        \n",
+    "        # --- BƯỚC 3: KHÔNG CHUẨN HÓA Ở ĐÂY NỮA ---\n",
+    "        # Chỉ đơn giản là định hình lại và xử lý NaN\n",
+    "        features_flat = all_features.reshape(-1, 8)\n",
+    "        features_flat = np.nan_to_num(features_flat, nan=0.0, posinf=0.0, neginf=0.0)\n",
+    "        \n",
+    "        # Gấp lại thành (n_segs, 19, 8) ĐỂ LƯU GIỮ NGUYÊN BẢN (RAW)\n",
+    "        final_tensor = features_flat.reshape(n_segs, 19, 8)\n",
+    "\n",
+    "        # --- BƯỚC 4: LƯU TENSOR ĐẦU RA ---\n",
+    "        feat_path = os.path.join(save_dir, f\"{sub_id}_features.npy\")\n",
+    "        np.save(feat_path, final_tensor.astype(np.float32))\n",
+    "        \n",
+    "        print(f\"Finished {sub_id}: Epochs={n_segs} | Tensor Shape={final_tensor.shape}\")\n",
+    "\n",
+    "    except Exception as e:\n",
+    "        print(f\"FAILED {sub_id}: {str(e)}\")\n",
+    "\n",
+    "# ==============================================================================\n",
+    "# 4. HÀM MAIN\n",
+    "# ==============================================================================\n",
+    "\n",
+    "def main_processing():\n",
+    "    RAW_DATA_ROOT = r\"/kaggle/input/datasets/dtandat/mf-mgcn-datasets/ds004504\" # Thay đổi đường dẫn thực tế của bạn\n",
+    "    \n",
+    "    BASE_DIR = '/kaggle/working'\n",
+    "    PROCESSED_DIR = os.path.join(BASE_DIR, \"processed_data\")\n",
+    "    \n",
+    "    if not os.path.exists(PROCESSED_DIR):\n",
+    "        os.makedirs(PROCESSED_DIR)\n",
+    "        \n",
+    "    # Tạo ma trận cấu trúc (Chỉ cần 1 lần)\n",
+    "    struct_adj = create_structural_adjacency()\n",
+    "    pd.DataFrame(struct_adj).to_csv(os.path.join(PROCESSED_DIR, \"structural_adjacency.csv\"), header=False, index=False)\n",
+    "    print(\">>> Initialized: Structural Adjacency Matrix (Prior Graph).\")\n",
+    "\n",
+    "    if not os.path.exists(RAW_DATA_ROOT):\n",
+    "        print(f\"ERROR: Không tìm thấy thư mục {RAW_DATA_ROOT}\")\n",
+    "        return\n",
+    "\n",
+    "    sub_folders = [f for f in os.listdir(RAW_DATA_ROOT) if f.startswith('sub-')]\n",
+    "    sub_folders.sort()\n",
+    "    \n",
+    "    print(f\">>> Tìm thấy {len(sub_folders)} subjects. Bắt đầu trích xuất Hybrid Features...\")\n",
+    "    \n",
+    "    count = 0\n",
+    "    for sub_id in sub_folders:\n",
+    "        eeg_path = os.path.join(RAW_DATA_ROOT, sub_id, 'eeg')\n",
+    "        set_files = glob.glob(os.path.join(eeg_path, \"*.set\"))\n",
+    "        \n",
+    "        if set_files:\n",
+    "            process_one_subject(set_files[0], PROCESSED_DIR, sub_id)\n",
+    "            count += 1\n",
+    "        else:\n",
+    "            print(f\"Warning: Không có file .set cho {sub_id}\")\n",
+    "            \n",
+    "    print(f\"\\n>>> HOÀN TẤT: Đã xử lý {count}/{len(sub_folders)} subjects.\")\n",
+    "    print(f\">>> Tensor Dữ liệu (Epochs, 19, 8) lưu tại: {PROCESSED_DIR}\")\n",
+    "\n",
+    "if __name__ == \"__main__\":\n",
+    "    main_processing()"
+   ]
+  }
+ ],
+ "metadata": {
+  "kaggle": {
+   "accelerator": "none",
+   "dataSources": [
+    {
+     "databundleVersionId": 16542997,
+     "datasetId": 9989031,
+     "sourceId": 15609361,
+     "sourceType": "datasetVersion"
+    }
+   ],
+   "dockerImageVersionId": 31328,
+   "isGpuEnabled": false,
+   "isInternetEnabled": true,
+   "language": "python",
+   "sourceType": "notebook"
+  },
+  "kernelspec": {
+   "display_name": "Python 3",
+   "language": "python",
+   "name": "python3"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.12.12"
+  },
+  "papermill": {
+   "default_parameters": {},
+   "duration": 804.591195,
+   "end_time": "2026-04-09T03:35:48.491907+00:00",
+   "environment_variables": {},
+   "exception": null,
+   "input_path": "__notebook__.ipynb",
+   "output_path": "__notebook__.ipynb",
+   "parameters": {},
+   "start_time": "2026-04-09T03:22:23.900712+00:00",
+   "version": "2.7.0"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 5
 }
-
-# Thông số cửa sổ trượt (Sliding Window):
-# [cite_start]- Độ dài T = 10 giây [cite: 317]
-# [cite_start]- Độ chồng lấp (Overlap) = 90% [cite: 110]
-WINDOW_SIZE = 10  
-OVERLAP = 0.9     
-
-# [cite_start]Thời lượng tín hiệu: Chọn 5 phút (300 giây) [cite: 307]
-DURATION_LIMIT = 300  
-
-# [cite_start]Danh sách 19 kênh chuẩn theo hệ thống 10-20 [cite: 304]
-STANDARD_CHANNELS = sys.argv[1:]
-
-# [cite_start]Định nghĩa vùng não [cite: 287, 288]
-BRAIN_REGIONS = {
-    'Frontal': ['Fp1', 'Fp2', 'F7', 'F3', 'Fz', 'F4', 'F8'],
-    'Central': ['C3', 'Cz', 'C4'],
-    'Parietal': ['P3', 'Pz', 'P4'],
-    'Temporal': ['T3', 'T4', 'T5', 'T6'],
-    'Occipital': ['O1', 'O2']
-}
-
-# ==============================================================================
-# 2. CÁC HÀM TÍNH TOÁN CỐT LÕI (ĐÃ GIA CỐ)
-# ==============================================================================
-
-def normalize_features(features_matrix):
-    """
-    Chuẩn hóa Z-score cho ma trận đặc trưng.
-    Input: features_matrix có dạng (n_segments, n_channels * n_bands)
-    """
-    scaler = StandardScaler()
-    # Fit và transform trên chính dữ liệu của subject đó
-    normalized_data = scaler.fit_transform(features_matrix)
-    return normalized_data
-
-def calculate_de(signal_data):
-    """
-    Tính đặc trưng Differential Entropy (DE) với cơ chế bảo vệ artifacts.
-    [cite_start]Công thức (3): DE = 0.5 * log2(2 * pi * e * sigma^2). [cite: 245]
-    """
-    # [QUAN TRỌNG] Clip biên độ tín hiệu để loại bỏ nhiễu mắt/cơ bắp quá lớn
-    # MNE lưu trữ dưới dạng Volts. 100 microVolts = 1e-4 V.
-    # Bất cứ tín hiệu nào vượt quá +/- 100uV thường là nhiễu trong resting-state EEG.
-    signal_data = np.clip(signal_data, -250e-6, 250e-6)
-    
-    # Tính phương sai (variance)
-    variance = np.var(signal_data, axis=-1)
-    
-    # [QUAN TRỌNG] Tránh log(0) bằng cách đặt sàn cho phương sai
-    variance = np.clip(variance, 1e-18, None)
-    
-    # Tính DE
-    factor = 2 * np.pi * np.e
-    de_value = 0.5 * np.log2(factor * variance)
-    
-    # [QUAN TRỌNG] Xử lý NaN/Inf nếu có
-    # Giá trị DE của EEG thường nằm trong khoảng -20 đến 10 (tùy đơn vị log).
-    # Nếu ra -Inf (do variance cực nhỏ), ta gán về giá trị thấp nhất hợp lý.
-    de_value = np.nan_to_num(de_value, nan=0.0, posinf=0.0, neginf=-50.0)
-    
-    return de_value
-
-def create_structural_adjacency():
-    """
-    Tạo ma trận kề cấu trúc (Spatial Connectivity).
-    [cite_start]Công thức (7): A[m,n]=1 nếu cùng vùng não. [cite: 290, 291]
-    """
-    n_nodes = len(STANDARD_CHANNELS)
-    adj = np.zeros((n_nodes, n_nodes))
-    
-    chan_to_region = {}
-    for region, chans in BRAIN_REGIONS.items():
-        for ch in chans:
-            chan_to_region[ch] = region
-            
-    for i, ch1 in enumerate(STANDARD_CHANNELS):
-        for j, ch2 in enumerate(STANDARD_CHANNELS):
-            region1 = chan_to_region.get(ch1)
-            region2 = chan_to_region.get(ch2)
-            
-            if region1 and region2 and region1 == region2:
-                adj[i, j] = 1
-            else:
-                adj[i, j] = 0
-    return adj
-
-# ==============================================================================
-# 3. QUY TRÌNH XỬ LÝ (SUBJECT PROCESSING)
-# ==============================================================================
-
-def process_one_subject(file_path, save_dir, sub_id):
-    try:
-        # --- BƯỚC 1: ĐỌC DỮ LIỆU ---
-        try:
-            raw = mne.io.read_raw_eeglab(file_path, preload=True, verbose=False)
-        except Exception as e:
-            print(f"Lỗi đọc file {sub_id}: {e}")
-            return
-
-        # Chọn 19 kênh chuẩn
-        available_chans = raw.info['ch_names']
-        picks = [ch for ch in STANDARD_CHANNELS if ch in available_chans]
-        
-        if len(picks) < 3:
-            print(f"BỎ QUA {sub_id}: Thiếu kênh (Tìm thấy {len(picks)}/19).")
-            return
-
-        raw.pick_channels(picks, ordered=True)
-        raw.set_eeg_reference('average', projection=False)
-        
-        # Cắt thời lượng
-        if raw.times[-1] > DURATION_LIMIT:
-            raw.crop(tmin=0, tmax=DURATION_LIMIT)
-
-        # [QUAN TRỌNG] Xử lý NaN trong raw data ngay từ đầu
-        data = raw.get_data()
-        if np.isnan(data).any():
-            data = np.nan_to_num(data, nan=0.0)
-            raw._data = data
-
-        # --- BƯỚC 2: PHÂN RÃ TẦN SỐ (Bandpass Filter) ---
-        filtered_signals = {}
-        for band_name, (l_freq, h_freq) in BANDS.items():
-            raw_copy = raw.copy()
-            # Dùng iir filter thay vì firwin để nhanh hơn và ổn định cho đoạn ngắn
-            # skip_by_annotation='edge' để tránh lỗi biên
-            try:
-                raw_copy.filter(l_freq, h_freq, method='iir', verbose=False)
-            except:
-                # Fallback nếu IIR lỗi
-                raw_copy.filter(l_freq, h_freq, verbose=False)
-            filtered_signals[band_name] = raw_copy.get_data()
-
-        # --- BƯỚC 3: SLIDING WINDOW & FEATURE EXTRACTION ---
-        sfreq = raw.info['sfreq']
-        window_samples = int(WINDOW_SIZE * sfreq)
-        step_samples = int(window_samples * (1 - OVERLAP))
-        total_samples = raw.n_times
-        
-        features_list = []
-        
-        for start in range(0, total_samples - window_samples + 1, step_samples):
-            end = start + window_samples
-            
-            segment_band_features = []
-            valid_segment = True
-            
-            for band_name in BANDS.keys():
-                data_segment = filtered_signals[band_name][:, start:end]
-                
-                # Kiểm tra độ dài segment
-                if data_segment.shape[1] < window_samples:
-                    valid_segment = False
-                    break
-                
-                # Tính DE
-                de_val = calculate_de(data_segment)
-                segment_band_features.append(de_val)
-            
-            if valid_segment:
-                # Stack: (19 channels, 5 bands)
-                segment_features_matrix = np.stack(segment_band_features, axis=1)
-                features_list.append(segment_features_matrix)
-        
-        if not features_list:
-            print(f"Cảnh báo: Không tạo được đoạn nào cho {sub_id} (Dữ liệu quá nhiễu hoặc ngắn).")
-            return
-
-        # Chuyển thành numpy array: (n_segs, 19, 5)
-        all_features = np.array(features_list)
-        n_segs = all_features.shape[0]
-
-        # --- BƯỚC 4: TÍNH MULTI-GRAPH ADJACENCY (PEARSON) ---
-# --- BƯỚC 4: TÍNH MULTI-GRAPH ADJACENCY (PEARSON) ---
-        adj_matrices = []
-        for band_idx in range(5):
-            band_data = all_features[:, :, band_idx]
-            channel_series = band_data.T
-            
-            try:
-                with np.errstate(divide='ignore', invalid='ignore'):
-                    corr = np.corrcoef(channel_series)
-            except:
-                corr = np.zeros((19, 19))
-            
-            corr = np.nan_to_num(corr, nan=0.0)
-            adj_matrices.append(corr)
-            
-        # Chuyển thành mảng numpy (5, 19, 19)
-        adj_multiband = np.array(adj_matrices)
-
-        # --- BƯỚC 5: LƯU DỮ LIỆU ---
-        # 1. Features
-        # Ma trận (n_segs, 19x5)
-        features_flat = all_features.reshape(n_segs, -1)
-        features_flat = np.nan_to_num(features_flat, nan=0.0, posinf=0.0, neginf=0.0)
-        
-        # 2. Áp dụng Z-score Normalization
-        # features_normalized = normalize_features(features_flat)
-        
-        # 3. Lưu dữ liệu
-        feat_path = os.path.join(save_dir, f"{sub_id}_features.npy")
-        adj_path = os.path.join(save_dir, f"{sub_id}_adj_multiband.npy")
-        
-        np.save(feat_path, features_flat.astype(np.float32))
-        np.save(adj_path, adj_multiband.astype(np.float32))
-        
-        print(f"Finished {sub_id}: Segments={n_segs} | Shape={features_flat.shape}")
-
-        # if sub_id == "sub-001": 
-        #     # Lấy sfreq thực tế từ file data
-        #     current_sfreq = raw.info['sfreq'] 
-            
-        #     visualize_processing_results(
-        #         raw_data=raw.get_data(), 
-        #         filtered_data_dict=filtered_signals, # Truyền Dictionary, KHÔNG truyền string "beta"
-        #         de_features=all_features, 
-        #         adj_matrix=adj_multiband, 
-        #         sub_id=sub_id,
-        #         sfreq=current_sfreq,
-        #         target_band='Alpha' # Bạn có thể đổi thành 'Alpha' hoặc 'Gamma' tùy ý
-        #     )
-
-    except Exception as e:
-        print(f"FAILED {sub_id}: {str(e)}")
-
-def visualize_processing_results(raw_data, filtered_data_dict, de_features, adj_matrix, sub_id, sfreq, target_band='Beta'):
-    """
-    Vẽ minh họa kết quả xử lý dữ liệu EEG.
-    
-    Tham số:
-    - raw_data: Mảng dữ liệu gốc (n_channels, n_samples)
-    - filtered_data_dict: Dictionary chứa data đã lọc theo từng band
-    - de_features: Mảng đặc trưng DE (n_segments, 19, 5)
-    - adj_matrix: Ma trận kề đa băng tần (5, 19, 19)
-    - sub_id: ID của đối tượng
-    - sfreq: Tần số lấy mẫu (Hz)
-    - target_band: Tên băng tần muốn xem (Mặc định: 'Beta')
-    """
-    
-    # 1. Xác định vị trí (index) của băng tần trong danh sách BANDS
-    band_names = ['Delta', 'Theta', 'Alpha', 'Beta', 'Gamma']
-    if target_band not in band_names:
-        print(f"Lỗi: Không tìm thấy băng tần {target_band}")
-        return
-    band_idx = band_names.index(target_band)
-
-    # Cấu hình phong cách đồ thị
-    sns.set_theme(style="whitegrid")
-    fig = plt.figure(figsize=(20, 12))
-    fig.suptitle(f"EEG DATA ANALYSIS - SUBJECT: {sub_id} (Band: {target_band})", fontsize=20, fontweight='bold', y=0.98)
-
-    # --- PANEL 1: SO SÁNH TÍN HIỆU THỜI GIAN (10 GIÂY ĐẦU) ---
-    plt.subplot(2, 2, 1)
-    ch_idx = 2   # Vẽ kênh Fp1 (index 0)
-    time_limit = 10 
-    samples = int(time_limit * sfreq)
-    time_axis = np.linspace(0, time_limit, samples)
-    
-    raw_snippet = raw_data[ch_idx, :samples] 
-    filtered_snippet = filtered_data_dict[target_band][ch_idx, :samples] 
-    
-    plt.plot(time_axis, raw_snippet, label='Raw EEG (Original)', alpha=0.4, color='gray', linestyle='--')
-    plt.plot(time_axis, filtered_snippet, label=f'{target_band} Band Filtered', color='crimson', linewidth=1.5)
-    plt.title(f"Signal Comparison - Channel: {STANDARD_CHANNELS[ch_idx]}", fontsize=14)
-    plt.xlabel("Time (seconds)")
-    plt.ylabel("Amplitude (V)")
-    plt.legend(loc='upper right')
-
-    # --- PANEL 2: BIỂU ĐỒ NHIỆT ĐẶC TRƯNG DE (TẤT CẢ CÁC KÊNH) ---
-    plt.subplot(2, 2, 2)
-    # Trích xuất DE của band tương ứng: (n_segments, 19) -> Transpose để kênh nằm ở trục dọc
-    band_de = de_features[:, :, band_idx].T 
-    
-    sns.heatmap(band_de, cmap='magma', cbar_kws={'label': 'DE Value (bits)'})
-    plt.title(f"Differential Entropy Heatmap - {target_band} Band", fontsize=14)
-    plt.xlabel("Sliding Window Segments (10s, 90% overlap)")
-    plt.ylabel("EEG Channels")
-    plt.yticks(ticks=np.arange(19)+0.5, labels=STANDARD_CHANNELS, rotation=0)
-
-    # --- PANEL 3: MA TRẬN KỀ ĐỘNG (DYNAMICAL CONNECTIVITY) ---
-    plt.subplot(2, 2, 3)
-    # Lấy ma trận kề của band tương ứng
-    sns.heatmap(adj_matrix[band_idx], cmap='YlOrRd', square=True, annot=False)
-    plt.title(f"Dynamic Adjacency (Pearson Correlation - {target_band})", fontsize=14)
-    plt.xlabel("Channel Index")
-    plt.ylabel("Channel Index")
-
-    # --- PANEL 4: MA TRẬN CẤU TRÚC (STRUCTURAL ADJACENCY) ---
-    plt.subplot(2, 2, 4)
-    struct_adj = create_structural_adjacency() #
-    sns.heatmap(struct_adj, cmap='Greys', cbar=False, square=True)
-    plt.title("Structural Adjacency (Intra-region Connection)", fontsize=14)
-    plt.xlabel("Channel Index")
-    plt.ylabel("Channel Index")
-
-    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-    plt.show()
-# ==============================================================================
-# 4. HÀM MAIN
-# ==============================================================================
-
-def main_processing():
-    # --- CẤU HÌNH ĐƯỜNG DẪN ---
-    # !!! Hãy thay đổi đường dẫn này trỏ đến thư mục dataset ds004504 trên máy bạn !!!
-    RAW_DATA_ROOT = r"/home/tandat/Downloads/Projects/MF-MGCN/ds004504"
-    
-    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-    PROCESSED_DIR = os.path.join(BASE_DIR, "processed_data")
-    
-    if not os.path.exists(PROCESSED_DIR):
-        os.makedirs(PROCESSED_DIR)
-        
-    # Tạo ma trận cấu trúc (1 lần)
-    struct_adj = create_structural_adjacency()
-    pd.DataFrame(struct_adj).to_csv(os.path.join(PROCESSED_DIR, "structural_adjacency.csv"), header=False, index=False)
-    print(">>> Initialized: Structural Adjacency Matrix.")
-
-    if not os.path.exists(RAW_DATA_ROOT):
-        print(f"ERROR: Không tìm thấy thư mục {RAW_DATA_ROOT}")
-        return
-
-    sub_folders = [f for f in os.listdir(RAW_DATA_ROOT) if f.startswith('sub-')]
-    sub_folders.sort()
-    
-    print(f">>> Tìm thấy {len(sub_folders)} subjects. Bắt đầu xử lý...")
-    
-    count = 0
-    for sub_id in sub_folders:
-        eeg_path = os.path.join(RAW_DATA_ROOT, sub_id, 'eeg')
-        set_files = glob.glob(os.path.join(eeg_path, "*.set"))
-        
-        if set_files:
-            process_one_subject(set_files[0], PROCESSED_DIR, sub_id)
-            count += 1
-        else:
-            print(f"Warning: Không có file .set cho {sub_id}")
-            
-    print(f"\n>>> HOÀN TẤT: Đã xử lý {count}/{len(sub_folders)} subjects.")
-    print(f">>> Dữ liệu lưu tại: {PROCESSED_DIR}")
-
-if __name__ == "__main__":
-    main_processing()
